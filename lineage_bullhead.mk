@@ -20,6 +20,9 @@
 # Get the long list of APNs
 PRODUCT_COPY_FILES := device/lge/bullhead/configs/apns-full-conf.xml:system/etc/apns-conf.xml
 
+# Lighter launcher (TrebuchetQuickStepGo); must precede common_full_phone.mk
+PRODUCT_TYPE := go
+
 # Inherit some common PixelExperience stuff.
 $(call inherit-product, vendor/lineage/config/common_full_phone.mk)
 
