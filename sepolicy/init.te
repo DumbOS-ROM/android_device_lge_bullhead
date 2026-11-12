@@ -34,6 +34,8 @@ allow init sysfs_msm_subsys_restart:file { read open write getattr setattr };
 allow init sysfs_mmc:dir { search read open };
 allow init sysfs_mmc:file rw_file_perms;
 
+allow init proc_swappiness:file w_file_perms;
+
 # kgsl
 allow init debugfs_kgsl:dir { search read open relabelfrom };
 allow init debugfs_kgsl:file { read write getattr setattr };
