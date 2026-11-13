@@ -73,6 +73,7 @@ final class Registrar implements SecAgreeChannel.Listener {
     private String mSubCallId;
     private String mSubTag;
     private String mSubBranch;
+    private String mSubToTag;
     private int mSubCseq;
     private boolean mSubscribed;
 
@@ -197,6 +198,7 @@ final class Registrar implements SecAgreeChannel.Listener {
         mServiceRoute.clear();
         mSubscribed = false;
         mSubCallId = null;
+        mSubToTag = null;
         mCallback.onRegistering();
         sendRegister(REQUESTED_EXPIRES);
     }
@@ -355,11 +357,8 @@ final class Registrar implements SecAgreeChannel.Listener {
         mRegistered = true;
         Log.i(TAG, "registered for " + expires + " s, service route " + mServiceRoute);
         if (first) mCallback.onRegistered(mIdentity);
-        if (!mSubscribed) {
-            mSubscribed = true;
-            sendSubscribe(SUBSCRIBE_EXPIRES);
-        }
         mHandler.postDelayed(() -> sendRegister(REQUESTED_EXPIRES), expires * 500L);
+        if (!mSubscribed) sendSubscribe(SUBSCRIBE_EXPIRES);
     }
 
     /**
@@ -382,7 +381,8 @@ final class Registrar implements SecAgreeChannel.Listener {
         sb.append("Route: ").append(initialRoute()).append("\r\n");
         for (String r : mServiceRoute) sb.append("Route: ").append(r).append("\r\n");
         sb.append("From: <").append(mIdentity).append(">;tag=").append(mSubTag).append("\r\n");
-        sb.append("To: <").append(mIdentity).append(">\r\n");
+        sb.append("To: <").append(mIdentity).append('>')
+                .append(mSubToTag != null ? ";tag=" + mSubToTag : "").append("\r\n");
         sb.append("Call-ID: ").append(mSubCallId).append("\r\n");
         sb.append("CSeq: ").append(++mSubCseq).append(" SUBSCRIBE\r\n");
         sb.append("Event: reg\r\n");
@@ -412,6 +412,8 @@ final class Registrar implements SecAgreeChannel.Listener {
                 // Keep 0: the NOTIFY's Subscription-State carries the authoritative value.
             }
         }
+        mSubscribed = true;
+        mSubToTag = SipMessage.param(msg.header("To"), "tag");
         Log.i(TAG, "subscribed to our registration state for " + expires + " s");
         if (expires > 60) {
             mHandler.postDelayed(() -> {
@@ -422,7 +424,7 @@ final class Registrar implements SecAgreeChannel.Listener {
 
     /** Logs what the network says about our bindings; acting on it is left for later. */
     private void onRegNotify(SipMessage msg) {
-        Matcher m = Pattern.compile("state=\"([a-z]+)\"[^>]*(?:event=\"([a-z]+)\")?")
+        Matcher m = Pattern.compile("state=\"([a-z]+)\"(?:[^>]*?\\bevent=\"([a-z]+)\")?")
                 .matcher(msg.body);
         StringBuilder states = new StringBuilder();
         while (m.find()) {

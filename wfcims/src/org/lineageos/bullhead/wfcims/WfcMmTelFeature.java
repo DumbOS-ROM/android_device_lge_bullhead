@@ -7,6 +7,7 @@ package org.lineageos.bullhead.wfcims;
 
 import android.content.Context;
 import android.net.ConnectivityManager;
+import android.net.LinkProperties;
 import android.net.Network;
 import android.net.NetworkCapabilities;
 import android.net.NetworkRequest;
@@ -114,6 +115,12 @@ final class WfcMmTelFeature extends MmTelFeature
             }
 
             @Override
+            public void onLinkPropertiesChanged(Network network, LinkProperties lp) {
+                // The interface is often not known yet at onAvailable.
+                mHandler.post(() -> onImsNetwork(network));
+            }
+
+            @Override
             public void onLost(Network network) {
                 mHandler.post(() -> onImsNetworkLost(network));
             }
@@ -125,6 +132,7 @@ final class WfcMmTelFeature extends MmTelFeature
 
     private void releaseImsNetwork() {
         endCalls("IMS network released");
+        WfcQualifiedNetworks.setVoiceWlanEnabled(false);
         if (mRegistrar != null) {
             mRegistrar.stop();
             mRegistrar = null;
@@ -139,7 +147,16 @@ final class WfcMmTelFeature extends MmTelFeature
 
     private void onImsNetwork(Network network) {
         if (network.equals(mImsNetwork)) return;
-        Log.i(TAG, "IMS network " + network + " available");
+        // The IMS APN can also come up over cellular, and this stack only speaks to the ePDG
+        // tunnel the IWLAN data service builds, so wait for an ipsec interface.
+        LinkProperties lp = mContext.getSystemService(ConnectivityManager.class)
+                .getLinkProperties(network);
+        String iface = lp != null ? lp.getInterfaceName() : null;
+        if (iface == null || !iface.startsWith("ipsec")) {
+            Log.i(TAG, "IMS network " + network + " is on " + iface + ", not the ePDG tunnel");
+            return;
+        }
+        Log.i(TAG, "IMS network " + network + " available on " + iface);
         if (mRegistrar != null) mRegistrar.stop();
         mImsNetwork = network;
         mRegistrar = new Registrar(mContext, new Handler(mHandler.getLooper()),

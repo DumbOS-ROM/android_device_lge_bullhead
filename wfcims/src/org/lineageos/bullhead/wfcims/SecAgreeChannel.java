@@ -39,8 +39,9 @@ final class SecAgreeChannel implements AutoCloseable {
      * Whole-message tracing. The text carries subscriber identities, so it is off unless someone
      * asks for it on a debuggable build: {@code setprop log.tag.WfcImsSip VERBOSE}.
      */
-    private static final boolean LOG_SIP =
-            Build.IS_DEBUGGABLE && Log.isLoggable("WfcImsSip", Log.VERBOSE);
+    private static boolean logSipEnabled() {
+        return Build.IS_DEBUGGABLE && Log.isLoggable("WfcImsSip", Log.VERBOSE);
+    }
     private static final int MAX_MESSAGE = 65536;
 
     interface Listener {
@@ -386,7 +387,7 @@ final class SecAgreeChannel implements AutoCloseable {
     }
 
     private static void logSip(String what, String text) {
-        if (LOG_SIP) {
+        if (logSipEnabled()) {
             Log.d(TAG, what + " (" + text.getBytes(StandardCharsets.UTF_8).length + " bytes)\n"
                     + text.replaceAll("(?i)(response|cnonce)=\"[^\"]*\"", "$1=\"...\""));
         } else {
