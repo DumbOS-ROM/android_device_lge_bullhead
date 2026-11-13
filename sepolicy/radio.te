@@ -15,3 +15,6 @@ allow radio debugfs_kgsl:file { read write getattr setattr };
 
 allow radio system_app_data_file:dir { search read open write add_name };
 allow radio system_app_data_file:file { read write getattr setattr open };
+
+# ImsMedia (phone uid) asks for realtime threads for Wi-Fi calling audio
+allow radio scheduling_policy_service:service_manager find;
