@@ -6,6 +6,7 @@
 package org.lineageos.bullhead.wfcims;
 
 import android.content.Context;
+import android.os.Bundle;
 import android.os.Handler;
 import android.os.Message;
 import android.telephony.ims.ImsCallProfile;
@@ -26,18 +27,23 @@ import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-/** One outgoing voice call over the registered IMS channel. All SIP work runs on the handler. */
+/** One voice call over the registered IMS channel. All SIP work runs on the handler. */
 final class WfcCallSession extends ImsCallSessionImplBase {
     private static final String TAG = "WfcIms";
     private static final long[] INVITE_RETRANSMIT_MS = {500, 1000, 2000, 4000, 4000, 4000, 4000};
     private static final long BYE_TIMEOUT_MS = 4000;
     private static final long CANCEL_TIMEOUT_MS = 32000;
+    private static final long[] ANSWER_RETRANSMIT_MS = {500, 1000, 2000, 4000, 4000, 4000, 4000,
+            4000, 4000, 4000};
 
     interface Owner {
         /** Telecom should route this call's audio like a VoIP call (ImsMedia, not the modem). */
         void useAndroidAudio();
 
         void onSessionEnded(WfcCallSession session);
+
+        /** Reports an incoming call to the framework; returns its session listener. */
+        ImsCallSessionListener notifyIncoming(WfcCallSession session, Bundle extras);
     }
 
     private final Context mContext;
@@ -45,7 +51,7 @@ final class WfcCallSession extends ImsCallSessionImplBase {
     private final Registrar mReg;
     private final Owner mOwner;
     private final ImsCallProfile mProfile;
-    private final String mCallId = Registrar.hex(12) + "@wfcims";
+    private final String mCallId;
     private final String mTag = Registrar.hex(4);
     private final Set<String> mPracked = new HashSet<>();
     private volatile int mState = State.IDLE;
@@ -64,6 +70,16 @@ final class WfcCallSession extends ImsCallSessionImplBase {
     private String mRemoteTarget;
     private List<String> mRouteSet = new ArrayList<>();
     private String mLocalSdp;
+    private String mLocalFrom;
+    private final boolean mIncoming;
+    private SipMessage mInviteReq;
+    private SecAgreeChannel mInviteChannel;
+    private InetSocketAddress mInviteSource;
+    private WfcMedia.Params mOffer;
+    private String mLastResponse;
+    private String mAnswer;
+    private int mAnswerSends;
+    private boolean mAcked;
 
     WfcCallSession(Context context, Handler handler, Registrar reg, ImsCallProfile profile,
             Owner owner) {
@@ -72,6 +88,56 @@ final class WfcCallSession extends ImsCallSessionImplBase {
         mReg = reg;
         mProfile = profile;
         mOwner = owner;
+        mIncoming = false;
+        mCallId = Registrar.hex(12) + "@wfcims";
+    }
+
+    /** An incoming call; {@link #onInitialInvite} must follow on the handler. */
+    WfcCallSession(Context context, Handler handler, Registrar reg, SipMessage invite,
+            Owner owner) {
+        mContext = context;
+        mHandler = new Handler(handler.getLooper());
+        mReg = reg;
+        mOwner = owner;
+        mIncoming = true;
+        mCallId = invite.header("Call-ID");
+        mProfile = new ImsCallProfile(ImsCallProfile.SERVICE_TYPE_NORMAL,
+                ImsCallProfile.CALL_TYPE_VOICE);
+        String caller = callerNumber(invite);
+        mProfile.setCallExtra(ImsCallProfile.EXTRA_OI, caller == null ? "" : caller);
+        mProfile.setCallExtraInt(ImsCallProfile.EXTRA_OIR, caller == null
+                ? ImsCallProfile.OIR_PRESENTATION_RESTRICTED
+                : ImsCallProfile.OIR_PRESENTATION_NOT_RESTRICTED);
+        mProfile.setCallExtraInt(ImsCallProfile.EXTRA_CNAP,
+                ImsCallProfile.OIR_PRESENTATION_NOT_RESTRICTED);
+    }
+
+    /** Number from P-Asserted-Identity (tel: first), else From; null when withheld. */
+    static String callerNumber(SipMessage invite) {
+        String privacy = invite.header("Privacy");
+        if (privacy != null && privacy.toLowerCase().matches(".*\\b(id|header)\\b.*")) {
+            return null;
+        }
+        List<String> ids = new ArrayList<>();
+        for (String v : invite.headerValues("P-Asserted-Identity")) {
+            for (String part : v.split(",")) ids.add(SipMessage.uri(part.trim()));
+        }
+        ids.add(SipMessage.uri(invite.header("From")));
+        String best = null;
+        for (String u : ids) {
+            if (u == null) continue;
+            String n = null;
+            if (u.startsWith("tel:")) {
+                n = u.substring(4).split(";")[0];
+            } else if (u.startsWith("sip:") || u.startsWith("sips:")) {
+                String user = u.substring(u.indexOf(':') + 1).split("[@;]")[0];
+                if (user.matches("\\+?[0-9*#]+")) n = user;
+            }
+            if (n == null || n.isEmpty()) continue;
+            if (u.startsWith("tel:")) return n;
+            if (best == null) best = n;
+        }
+        return best;
     }
 
     @Override
@@ -102,6 +168,10 @@ final class WfcCallSession extends ImsCallSessionImplBase {
     @Override
     public int getState() {
         return mState;
+    }
+
+    boolean isEnded() {
+        return mState == State.TERMINATED;
     }
 
     @Override
@@ -258,6 +328,12 @@ final class WfcCallSession extends ImsCallSessionImplBase {
     void onResponse(SipMessage msg) {
         String method = msg.method();
         int code = msg.code();
+        if (mState == State.TERMINATED) {
+            if ("INVITE".equalsIgnoreCase(method) && code >= 200 && code < 300 && mTo != null) {
+                sendAck();
+            }
+            return;
+        }
         if ("INVITE".equalsIgnoreCase(method)) {
             onInviteResponse(msg, code);
         } else if ("BYE".equalsIgnoreCase(method) && mState == State.TERMINATING) {
@@ -327,8 +403,28 @@ final class WfcCallSession extends ImsCallSessionImplBase {
     /** In-dialog requests routed here by Call-ID. */
     void onRequest(SecAgreeChannel channel, SipMessage msg, InetSocketAddress from) {
         String method = msg.method().toUpperCase();
+        if (mState == State.TERMINATED) {
+            if ("INVITE".equals(method) && mIncoming && mInviteReq != null
+                    && msg.branch() != null && msg.branch().equals(mInviteReq.branch())) {
+                resendInviteResponse();
+            } else if (!"ACK".equals(method)) {
+                mReg.answer(channel, msg, from, "BYE".equals(method) ? 200 : 481,
+                        "BYE".equals(method) ? "OK" : "Call/Transaction Does Not Exist");
+            }
+            return;
+        }
         switch (method) {
             case "ACK":
+                if (mIncoming && mAnswer != null && !mAcked) onAck();
+                return;
+            case "CANCEL":
+                mReg.answer(channel, msg, from, 200, "OK");
+                if (mIncoming && mState == State.INITIATED) {
+                    respondInvite(487, "Request Terminated", null, null);
+                    Log.i(TAG, "caller cancelled");
+                    finish(reason(ImsReasonInfo.CODE_USER_TERMINATED_BY_REMOTE, "CANCEL"),
+                            false);
+                }
                 return;
             case "BYE":
                 mReg.answer(channel, msg, from, 200, "OK");
@@ -336,6 +432,13 @@ final class WfcCallSession extends ImsCallSessionImplBase {
                 finish(reason(ImsReasonInfo.CODE_USER_TERMINATED_BY_REMOTE, "BYE"), false);
                 return;
             case "INVITE":
+                if (mIncoming && mInviteReq != null
+                        && mInviteReq.branch() != null
+                        && mInviteReq.branch().equals(msg.branch())) {
+                    resendInviteResponse();
+                    return;
+                }
+                // fall through: re-INVITE
             case "UPDATE": {
                 boolean offer = msg.body.contains("m=audio");
                 if (offer) onRemoteSdp(msg.body);
@@ -349,6 +452,170 @@ final class WfcCallSession extends ImsCallSessionImplBase {
             default:
                 mReg.answer(channel, msg, from, 200, "OK");
         }
+    }
+
+    @Override
+    public void accept(int callType, ImsStreamMediaProfile profile) {
+        mHandler.post(this::doAccept);
+    }
+
+    @Override
+    public void reject(int reason) {
+        mHandler.post(() -> doReject(reason == ImsReasonInfo.CODE_USER_DECLINE ? 603 : 486,
+                reason == ImsReasonInfo.CODE_USER_DECLINE ? "Decline" : "Busy Here"));
+    }
+
+    /** Answers a new INVITE with 100 and 180, then reports the call; false if refused. */
+    boolean onInitialInvite(SecAgreeChannel channel, SipMessage invite, InetSocketAddress from) {
+        mInviteReq = invite;
+        mInviteChannel = channel;
+        mInviteSource = from;
+        mLocalFrom = invite.header("To") + ";tag=" + mTag;
+        mTo = invite.header("From");
+        mRemoteTarget = SipMessage.uri(invite.header("Contact"));
+        mRouteSet = new ArrayList<>();
+        for (String v : invite.headerValues("Record-Route")) {
+            Matcher um = Pattern.compile("<[^>]+>").matcher(v);
+            while (um.find()) mRouteSet.add(um.group());
+        }
+        respondInvite(100, "Trying", null, null);
+        String require = invite.header("Require");
+        if (require != null && require.toLowerCase().contains("precondition")) {
+            Log.w(TAG, "incoming call requires preconditions, not supported");
+            respondInvite(420, "Bad Extension", "Unsupported: precondition\r\n", null);
+            mState = State.TERMINATED;
+            return false;
+        }
+        mOffer = invite.body.contains("m=audio") ? parseSdp(invite.body) : null;
+        if (mOffer == null) {
+            Log.w(TAG, "incoming call without a usable AMR offer");
+            respondInvite(488, "Not Acceptable Here", null, null);
+            mState = State.TERMINATED;
+            return false;
+        }
+        try {
+            mMedia = new WfcMedia(mContext, mHandler, mReg.network(), mReg.localAddress());
+        } catch (Exception e) {
+            Log.w(TAG, "media: " + e);
+            respondInvite(500, "Server Internal Error", null, null);
+            mState = State.TERMINATED;
+            return false;
+        }
+        mLocalSdp = answerSdp(invite.body, mOffer);
+        mState = State.INITIATED;
+        respondInvite(180, "Ringing", "Contact: " + mReg.contact() + "\r\n", null);
+        Bundle extras = new Bundle();
+        ImsCallSessionListener l = mOwner.notifyIncoming(this, extras);
+        if (l != null) mListener = l;
+        Log.i(TAG, "incoming call ringing");
+        return true;
+    }
+
+    private void doAccept() {
+        if (!mIncoming || mState != State.INITIATED || mAnswer != null) return;
+        String se = mInviteReq.header("Session-Expires");
+        String extra = "Contact: " + mReg.contact() + "\r\n"
+                + "Allow: INVITE,ACK,CANCEL,BYE,UPDATE,PRACK,MESSAGE,OPTIONS,NOTIFY,REFER\r\n"
+                + (se != null ? "Session-Expires: " + se.split(";")[0].trim()
+                        + ";refresher=uac\r\nRequire: timer\r\n" : "");
+        mOwner.useAndroidAudio();
+        mMedia.apply(mOffer);
+        mAnswer = buildInviteResponse(200, "OK", extra, mLocalSdp);
+        mAnswerSends = 0;
+        sendAnswer();
+        Log.i(TAG, "incoming call answered");
+    }
+
+    private void sendAnswer() {
+        if (mAcked || mState == State.TERMINATED) return;
+        sendRaw(mAnswer);
+        if (mAnswerSends < ANSWER_RETRANSMIT_MS.length) {
+            mHandler.postDelayed(this::sendAnswer, ANSWER_RETRANSMIT_MS[mAnswerSends++]);
+        } else {
+            Log.w(TAG, "no ACK for the answer");
+            sendBye();
+        }
+    }
+
+    private void onAck() {
+        mAcked = true;
+        mState = State.ESTABLISHED;
+        if (mListener != null) {
+            mListener.callSessionInitiated(new ImsCallProfile(mProfile.getServiceType(),
+                    mProfile.getCallType(), mProfile.getCallExtras(), mediaProfile()));
+        }
+    }
+
+    private void doReject(int code, String why) {
+        if (!mIncoming || mState != State.INITIATED || mAnswer != null) return;
+        respondInvite(code, why, null, null);
+        finish(reason(ImsReasonInfo.CODE_USER_DECLINE, why), false);
+    }
+
+    private void resendInviteResponse() {
+        if (mAnswer != null) {
+            sendRaw(mAnswer);
+        } else if (mLastResponse != null) {
+            sendRaw(mLastResponse);
+        }
+    }
+
+    private void respondInvite(int code, String reason, String extra, String body) {
+        String r = buildInviteResponse(code, reason, extra, body);
+        if (code > 100) mLastResponse = r;
+        sendRaw(r);
+    }
+
+    private String buildInviteResponse(int code, String reason, String extra, String body) {
+        StringBuilder sb = new StringBuilder("SIP/2.0 ").append(code).append(' ').append(reason)
+                .append("\r\n");
+        for (String[] h : mInviteReq.headers) {
+            String n = h[0].toLowerCase();
+            if (n.equals("via") || n.equals("from") || n.equals("call-id") || n.equals("cseq")
+                    || (n.equals("record-route") && code > 100)) {
+                sb.append(h[0]).append(": ").append(h[1]).append("\r\n");
+            }
+        }
+        sb.append("To: ").append(code == 100 ? mInviteReq.header("To") : mLocalFrom)
+                .append("\r\n");
+        if (extra != null) sb.append(extra);
+        if (body != null) {
+            sb.append("Content-Type: application/sdp\r\nContent-Length: ")
+                    .append(body.getBytes(StandardCharsets.UTF_8).length).append("\r\n\r\n")
+                    .append(body);
+        } else {
+            sb.append("Content-Length: 0\r\n\r\n");
+        }
+        return sb.toString();
+    }
+
+    private void sendRaw(String response) {
+        try {
+            mInviteChannel.sendResponse(response, mInviteSource);
+        } catch (Exception e) {
+            Log.w(TAG, "respond: " + e);
+        }
+    }
+
+    /** SDP answer: the offered AMR payload type and its telephone-event, nothing else. */
+    private String answerSdp(String offer, WfcMedia.Params p) {
+        String a = mReg.localAddress().getHostAddress();
+        String codec = p.wideband ? "AMR-WB/16000/1" : "AMR/8000/1";
+        StringBuilder sb = new StringBuilder("v=0\r\no=wfcims 1 1 IN IP6 ").append(a)
+                .append("\r\ns=-\r\nc=IN IP6 ").append(a).append("\r\nt=0 0\r\n")
+                .append("m=audio ").append(mMedia.port()).append(" RTP/AVP ").append(p.payloadType);
+        if (p.dtmfPayloadType >= 0) sb.append(' ').append(p.dtmfPayloadType);
+        sb.append("\r\na=rtpmap:").append(p.payloadType).append(' ').append(codec).append("\r\n");
+        String fmtp = fmtp(offer, p.payloadType);
+        if (fmtp != null) {
+            sb.append("a=fmtp:").append(p.payloadType).append(' ').append(fmtp).append("\r\n");
+        }
+        if (p.dtmfPayloadType >= 0) {
+            sb.append("a=rtpmap:").append(p.dtmfPayloadType).append(" telephone-event/")
+                    .append(p.dtmfRateKHz * 1000).append("\r\na=fmtp:")
+                    .append(p.dtmfPayloadType).append(" 0-15\r\n");
+        }
+        return sb.append("a=ptime:20\r\na=maxptime:240\r\na=sendrecv\r\n").toString();
     }
 
     private void onRemoteSdp(String sdp) {
@@ -429,6 +696,14 @@ final class WfcCallSession extends ImsCallSessionImplBase {
     }
 
     private void doTerminate() {
+        if (mIncoming && mState == State.INITIATED) {
+            if (mAnswer == null) {
+                doReject(480, "Temporarily Unavailable");
+            } else {
+                sendBye();
+            }
+            return;
+        }
         switch (mState) {
             case State.ESTABLISHED:
                 sendBye();
@@ -474,13 +749,17 @@ final class WfcCallSession extends ImsCallSessionImplBase {
         sb.append(via("z9hG4bK" + Registrar.hex(8)));
         sb.append("Max-Forwards: 70\r\n");
         for (String r : routes) sb.append("Route: ").append(r).append("\r\n");
-        sb.append("From: <").append(mReg.identity()).append(">;tag=").append(mTag).append("\r\n");
+        sb.append("From: ").append(localFrom()).append("\r\n");
         sb.append("To: ").append(to).append("\r\n");
         sb.append("Call-ID: ").append(mCallId).append("\r\n");
         sb.append("CSeq: ").append(cseq).append(' ').append(method).append("\r\n");
         sb.append(extra);
         sb.append("Content-Length: 0\r\n\r\n");
         mReg.send(sb.toString());
+    }
+
+    private String localFrom() {
+        return mLocalFrom != null ? mLocalFrom : "<" + mReg.identity() + ">;tag=" + mTag;
     }
 
     private static List<String> routeSet(SipMessage msg) {

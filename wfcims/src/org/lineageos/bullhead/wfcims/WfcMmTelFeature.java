@@ -11,10 +11,12 @@ import android.net.Network;
 import android.net.NetworkCapabilities;
 import android.net.NetworkRequest;
 import android.net.TelephonyNetworkSpecifier;
+import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.telephony.TelephonyManager;
 import android.telephony.ims.ImsCallProfile;
+import android.telephony.ims.ImsCallSessionListener;
 import android.telephony.ims.ImsReasonInfo;
 import android.telephony.ims.feature.CapabilityChangeRequest;
 import android.telephony.ims.feature.MmTelFeature;
@@ -27,7 +29,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Map;
 
-/** MMTEL voice over IWLAN, registered by {@link Registrar}. Outgoing calls only. */
+/** MMTEL voice over IWLAN, registered by {@link Registrar}. One call at a time. */
 final class WfcMmTelFeature extends MmTelFeature
         implements Registrar.Callback, WfcCallSession.Owner {
     private static final String TAG = "WfcIms";
@@ -194,11 +196,31 @@ final class WfcMmTelFeature extends MmTelFeature
             return true;
         }
         if ("INVITE".equalsIgnoreCase(msg.method())) {
-            Log.i(TAG, "incoming call declined: incoming calls are not implemented yet");
-            mRegistrar.answer(channel, msg, from, 486, "Busy Here");
+            boolean busy = false;
+            for (WfcCallSession c : mCalls.values()) busy |= !c.isEnded();
+            if (!mVoiceWlanEnabled || busy) {
+                Log.i(TAG, "incoming call declined: " + (!busy
+                        ? "voice over WLAN off" : "already in a call"));
+                mRegistrar.answer(channel, msg, from, 486, "Busy Here");
+                return true;
+            }
+            WfcCallSession incoming =
+                    new WfcCallSession(mContext, mHandler, mRegistrar, msg, this);
+            mCalls.put(incoming.getCallId(), incoming);
+            if (!incoming.onInitialInvite(channel, msg, from)) onSessionEnded(incoming);
             return true;
         }
         return false;
+    }
+
+    @Override
+    public ImsCallSessionListener notifyIncoming(WfcCallSession session, Bundle extras) {
+        try {
+            return notifyIncomingCall(session, session.getCallId(), extras);
+        } catch (RuntimeException e) {
+            Log.w(TAG, "notifyIncomingCall: " + e);
+            return null;
+        }
     }
 
     @Override
@@ -247,14 +269,17 @@ final class WfcMmTelFeature extends MmTelFeature
 
     @Override
     public void onSessionEnded(WfcCallSession session) {
-        mCalls.remove(session.getCallId());
+        // Kept for 32 s (SIP timer H/J) to absorb retransmitted requests.
+        mHandler.postDelayed(() -> {
+            if (mCalls.get(session.getCallId()) == session) mCalls.remove(session.getCallId());
+        }, 32000);
     }
 
     private void endCalls(String why) {
         for (WfcCallSession call : new ArrayList<>(mCalls.values())) {
+            if (call.isEnded()) continue;
             call.finish(new ImsReasonInfo(ImsReasonInfo.CODE_LOCAL_CALL_TERMINATED, 0, why),
                     call.getState() != ImsCallSessionImplBase.State.ESTABLISHED);
         }
-        mCalls.clear();
     }
 }
