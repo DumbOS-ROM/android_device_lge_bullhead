@@ -77,6 +77,10 @@ final class SecAgreeChannel implements AutoCloseable {
         return t;
     }
 
+    int pcscfPort() {
+        return mPcscfPortS;
+    }
+
     int serverPort() {
         return mServer.getLocalPort();
     }

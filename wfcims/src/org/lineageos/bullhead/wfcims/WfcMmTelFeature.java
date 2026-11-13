@@ -13,16 +13,23 @@ import android.net.NetworkRequest;
 import android.net.TelephonyNetworkSpecifier;
 import android.os.Handler;
 import android.os.Looper;
+import android.telephony.TelephonyManager;
+import android.telephony.ims.ImsCallProfile;
 import android.telephony.ims.ImsReasonInfo;
 import android.telephony.ims.feature.CapabilityChangeRequest;
 import android.telephony.ims.feature.MmTelFeature;
+import android.telephony.ims.stub.ImsCallSessionImplBase;
 import android.telephony.ims.stub.ImsRegistrationImplBase;
 import android.util.Log;
 
 import java.net.InetSocketAddress;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Map;
 
-/** MMTEL voice over IWLAN, registered by {@link Registrar}. Calls are not handled yet. */
-final class WfcMmTelFeature extends MmTelFeature implements Registrar.Callback {
+/** MMTEL voice over IWLAN, registered by {@link Registrar}. Outgoing calls only. */
+final class WfcMmTelFeature extends MmTelFeature
+        implements Registrar.Callback, WfcCallSession.Owner {
     private static final String TAG = "WfcIms";
 
     private final Context mContext;
@@ -33,6 +40,7 @@ final class WfcMmTelFeature extends MmTelFeature implements Registrar.Callback {
     private ConnectivityManager.NetworkCallback mNetworkCallback;
     private Network mImsNetwork;
     private boolean mVoiceWlanEnabled;
+    private final Map<String, WfcCallSession> mCalls = new HashMap<>();
 
     WfcMmTelFeature(Context context, Looper looper, int subId, ImsRegistrationImplBase reg) {
         mContext = context;
@@ -113,6 +121,7 @@ final class WfcMmTelFeature extends MmTelFeature implements Registrar.Callback {
     }
 
     private void releaseImsNetwork() {
+        endCalls("IMS network released");
         if (mRegistrar != null) {
             mRegistrar.stop();
             mRegistrar = null;
@@ -130,7 +139,8 @@ final class WfcMmTelFeature extends MmTelFeature implements Registrar.Callback {
         Log.i(TAG, "IMS network " + network + " available");
         if (mRegistrar != null) mRegistrar.stop();
         mImsNetwork = network;
-        mRegistrar = new Registrar(mContext, mHandler, new ImsIdentity(mContext, mSubId), this);
+        mRegistrar = new Registrar(mContext, new Handler(mHandler.getLooper()),
+                new ImsIdentity(mContext, mSubId), this);
         mRegistrar.start(network);
     }
 
@@ -138,6 +148,7 @@ final class WfcMmTelFeature extends MmTelFeature implements Registrar.Callback {
         if (!network.equals(mImsNetwork)) return;
         Log.i(TAG, "IMS network " + network + " lost");
         mImsNetwork = null;
+        endCalls("IMS network lost");
         if (mRegistrar != null) {
             mRegistrar.stop();
             mRegistrar = null;
@@ -169,6 +180,7 @@ final class WfcMmTelFeature extends MmTelFeature implements Registrar.Callback {
 
     @Override
     public void onDeregistered(String reason) {
+        endCalls("deregistered: " + reason);
         mRegistration.onDeregistered(new ImsReasonInfo(
                 ImsReasonInfo.CODE_REGISTRATION_ERROR, 0, reason));
         updateCapabilities();
@@ -176,11 +188,73 @@ final class WfcMmTelFeature extends MmTelFeature implements Registrar.Callback {
 
     @Override
     public boolean onRequest(SecAgreeChannel channel, SipMessage msg, InetSocketAddress from) {
+        WfcCallSession call = mCalls.get(msg.header("Call-ID"));
+        if (call != null) {
+            call.onRequest(channel, msg, from);
+            return true;
+        }
         if ("INVITE".equalsIgnoreCase(msg.method())) {
-            Log.i(TAG, "incoming call declined: calls are not implemented yet");
+            Log.i(TAG, "incoming call declined: incoming calls are not implemented yet");
             mRegistrar.answer(channel, msg, from, 486, "Busy Here");
             return true;
         }
         return false;
+    }
+
+    @Override
+    public void onResponse(SipMessage msg) {
+        WfcCallSession call = mCalls.get(msg.header("Call-ID"));
+        if (call != null) call.onResponse(msg);
+    }
+
+    @Override
+    public int shouldProcessCall(String[] numbers) {
+        Registrar reg = mRegistrar;
+        if (reg == null || !reg.isRegistered()) return PROCESS_CALL_CSFB;
+        TelephonyManager tm = mContext.getSystemService(TelephonyManager.class);
+        for (String n : numbers) {
+            try {
+                if (tm.isEmergencyNumber(n)) return PROCESS_CALL_CSFB;
+            } catch (RuntimeException e) {
+                return PROCESS_CALL_CSFB;
+            }
+        }
+        return PROCESS_CALL_IMS;
+    }
+
+    @Override
+    public ImsCallProfile createCallProfile(int callSessionType, int callType) {
+        return new ImsCallProfile(callSessionType, callType);
+    }
+
+    @Override
+    public ImsCallSessionImplBase createCallSession(ImsCallProfile profile) {
+        Registrar reg = mRegistrar;
+        if (reg == null) return null;
+        WfcCallSession call = new WfcCallSession(mContext, mHandler, reg, profile, this);
+        mHandler.post(() -> mCalls.put(call.getCallId(), call));
+        return call;
+    }
+
+    @Override
+    public void useAndroidAudio() {
+        try {
+            setCallAudioHandler(AUDIO_HANDLER_ANDROID);
+        } catch (RuntimeException e) {
+            Log.w(TAG, "setCallAudioHandler: " + e);
+        }
+    }
+
+    @Override
+    public void onSessionEnded(WfcCallSession session) {
+        mCalls.remove(session.getCallId());
+    }
+
+    private void endCalls(String why) {
+        for (WfcCallSession call : new ArrayList<>(mCalls.values())) {
+            call.finish(new ImsReasonInfo(ImsReasonInfo.CODE_LOCAL_CALL_TERMINATED, 0, why),
+                    call.getState() != ImsCallSessionImplBase.State.ESTABLISHED);
+        }
+        mCalls.clear();
     }
 }

@@ -37,6 +37,9 @@ final class Registrar implements SecAgreeChannel.Listener {
 
         /** A request other than REGISTER responses arrived; return true if handled. */
         boolean onRequest(SecAgreeChannel channel, SipMessage msg, InetSocketAddress from);
+
+        /** A response to a request other than REGISTER arrived. */
+        void onResponse(SipMessage msg);
     }
 
     private static final SecureRandom RANDOM = new SecureRandom();
@@ -80,6 +83,49 @@ final class Registrar implements SecAgreeChannel.Listener {
 
     boolean isRegistered() {
         return mRegistered;
+    }
+
+    ImsIdentity id() {
+        return mId;
+    }
+
+    Network network() {
+        return mNetwork;
+    }
+
+    /** Our address as it appears in Via and Contact, bracketed. */
+    String localHost() {
+        return "[" + mChannel.local.getHostAddress() + "]";
+    }
+
+    int localPort() {
+        return mChannel.serverPort();
+    }
+
+    /** Loose route to the P-CSCF's protected port, for requests outside a dialog. */
+    String initialRoute() {
+        return "<sip:[" + mChannel.pcscf.getHostAddress() + "]:" + mChannel.pcscfPort() + ";lr>";
+    }
+
+    InetAddress localAddress() {
+        return mChannel.local;
+    }
+
+    String contact() {
+        return "<sip:" + mId.user + "@" + localHost() + ":" + localPort()
+                + ">;+g.3gpp.icsi-ref=\"urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel\"";
+    }
+
+    /** Sends a request to the P-CSCF over the protected channel; false if that failed. */
+    boolean send(String request) {
+        if (mChannel == null || !mChannel.isProtected()) return false;
+        try {
+            mChannel.sendRequest(request);
+            return true;
+        } catch (Exception e) {
+            Log.w(TAG, "send: " + e);
+            return false;
+        }
     }
 
     void start(Network network) {
@@ -213,7 +259,10 @@ final class Registrar implements SecAgreeChannel.Listener {
             if (!mCallback.onRequest(channel, msg, from)) answer(channel, msg, from, 200, "OK");
             return;
         }
-        if (!"REGISTER".equalsIgnoreCase(msg.method())) return;
+        if (!"REGISTER".equalsIgnoreCase(msg.method())) {
+            mCallback.onResponse(msg);
+            return;
+        }
         if (mPendingBranch == null || !mPendingBranch.equals(msg.branch())) return;
         int code = msg.code();
         if (code < 200) return;
@@ -281,19 +330,33 @@ final class Registrar implements SecAgreeChannel.Listener {
 
     void answer(SecAgreeChannel channel, SipMessage req, InetSocketAddress to, int code,
             String reason) {
+        respond(channel, req, to, code, reason, null, null);
+    }
+
+    /** Answers a request; extra is whole header lines, body is SDP when not null. */
+    void respond(SecAgreeChannel channel, SipMessage req, InetSocketAddress to, int code,
+            String reason, String extra, String body) {
         if ("ACK".equalsIgnoreCase(req.method())) return;
         StringBuilder sb = new StringBuilder("SIP/2.0 ").append(code).append(' ').append(reason)
                 .append("\r\n");
         for (String[] h : req.headers) {
             String n = h[0].toLowerCase();
-            if (n.equals("via") || n.equals("from") || n.equals("call-id") || n.equals("cseq")) {
+            if (n.equals("via") || n.equals("from") || n.equals("call-id") || n.equals("cseq")
+                    || n.equals("record-route")) {
                 sb.append(h[0]).append(": ").append(h[1]).append("\r\n");
             } else if (n.equals("to")) {
                 sb.append(h[0]).append(": ").append(h[1])
                         .append(h[1].contains(";tag=") ? "" : ";tag=" + hex(4)).append("\r\n");
             }
         }
-        sb.append("Content-Length: 0\r\n\r\n");
+        if (extra != null) sb.append(extra);
+        if (body != null) {
+            sb.append("Content-Type: application/sdp\r\nContent-Length: ")
+                    .append(body.getBytes(StandardCharsets.UTF_8).length).append("\r\n\r\n")
+                    .append(body);
+        } else {
+            sb.append("Content-Length: 0\r\n\r\n");
+        }
         try {
             channel.sendResponse(sb.toString(), to);
         } catch (Exception e) {
