@@ -66,7 +66,8 @@ final class WfcMedia {
     WfcMedia(Context context, Handler handler, Network network, InetAddress local)
             throws Exception {
         mContext = context;
-        mHandler = handler;
+        // Own handler: the call session clears its handler's queue when the call ends.
+        mHandler = new Handler(handler.getLooper());
         DatagramSocket rtp = null;
         DatagramSocket rtcp = null;
         for (int i = 0; i < 32 && rtcp == null; i++) {
@@ -144,6 +145,7 @@ final class WfcMedia {
                     public void onOpenSessionFailure(int error) {
                         mOpening = false;
                         Log.w(TAG, "audio session failed: " + error);
+                        if (mClosed) mManager.release();
                     }
 
                     @Override

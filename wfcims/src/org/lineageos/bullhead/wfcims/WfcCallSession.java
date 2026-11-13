@@ -9,6 +9,7 @@ import android.content.Context;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Message;
+import android.os.RemoteException;
 import android.telephony.ims.ImsCallProfile;
 import android.telephony.ims.ImsCallSessionListener;
 import android.telephony.ims.ImsReasonInfo;
@@ -21,8 +22,10 @@ import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -33,7 +36,8 @@ final class WfcCallSession extends ImsCallSessionImplBase {
     private static final long[] INVITE_RETRANSMIT_MS = {500, 1000, 2000, 4000, 4000, 4000, 4000};
     private static final long BYE_TIMEOUT_MS = 4000;
     private static final long CANCEL_TIMEOUT_MS = 32000;
-    private static final long[] ANSWER_RETRANSMIT_MS = {500, 1000, 2000, 4000, 4000, 4000, 4000,
+    /** Timer E/G style retransmissions, about 32 s in total (timers F and H). */
+    private static final long[] RETRANSMIT_MS = {500, 1000, 2000, 4000, 4000, 4000, 4000,
             4000, 4000, 4000};
 
     interface Owner {
@@ -48,6 +52,9 @@ final class WfcCallSession extends ImsCallSessionImplBase {
 
     private final Context mContext;
     private final Handler mHandler;
+    /** Retransmissions; unlike mHandler it is not cleared when the call ends. */
+    private final Handler mTx;
+    private final Map<String, Runnable> mPending = new HashMap<>();
     private final Registrar mReg;
     private final Owner mOwner;
     private final ImsCallProfile mProfile;
@@ -55,7 +62,7 @@ final class WfcCallSession extends ImsCallSessionImplBase {
     private final String mTag = Registrar.hex(4);
     private final Set<String> mPracked = new HashSet<>();
     private volatile int mState = State.IDLE;
-    private ImsCallSessionListener mListener;
+    private volatile ImsCallSessionListener mListener;
     private WfcMedia mMedia;
     private String mRuri;
     private String mInitialRoute;
@@ -80,11 +87,16 @@ final class WfcCallSession extends ImsCallSessionImplBase {
     private String mAnswer;
     private int mAnswerSends;
     private boolean mAcked;
+    private boolean mStarted;
+    private boolean mByeSent;
+    private boolean mCancelSent;
+    private Runnable mFinalRetransmit;
 
     WfcCallSession(Context context, Handler handler, Registrar reg, ImsCallProfile profile,
             Owner owner) {
         mContext = context;
         mHandler = new Handler(handler.getLooper());
+        mTx = new Handler(handler.getLooper());
         mReg = reg;
         mProfile = profile;
         mOwner = owner;
@@ -97,6 +109,7 @@ final class WfcCallSession extends ImsCallSessionImplBase {
             Owner owner) {
         mContext = context;
         mHandler = new Handler(handler.getLooper());
+        mTx = new Handler(handler.getLooper());
         mReg = reg;
         mOwner = owner;
         mIncoming = true;
@@ -222,7 +235,13 @@ final class WfcCallSession extends ImsCallSessionImplBase {
     public void sendDtmf(char c, Message result) {
         mHandler.post(() -> {
             if (mMedia != null) mMedia.sendDtmf(c);
-            if (result != null) result.sendToTarget();
+            if (result != null && result.replyTo != null) {
+                try {
+                    result.replyTo.send(result);
+                } catch (RemoteException e) {
+                    Log.w(TAG, "DTMF completion: " + e);
+                }
+            }
         });
     }
 
@@ -237,6 +256,16 @@ final class WfcCallSession extends ImsCallSessionImplBase {
     public void stopDtmf() {
         mHandler.post(() -> {
             if (mMedia != null) mMedia.stopDtmf();
+        });
+    }
+
+    @Override
+    public void close() {
+        mHandler.post(() -> {
+            if (mState == State.IDLE) {
+                mState = State.TERMINATED;
+                mOwner.onSessionEnded(this);
+            }
         });
     }
 
@@ -328,9 +357,13 @@ final class WfcCallSession extends ImsCallSessionImplBase {
     void onResponse(SipMessage msg) {
         String method = msg.method();
         int code = msg.code();
+        if (code >= 200) {
+            Runnable r = mPending.remove(msg.branch() + " " + method.toUpperCase());
+            if (r != null) mTx.removeCallbacks(r);
+        }
         if (mState == State.TERMINATED) {
-            if ("INVITE".equalsIgnoreCase(method) && code >= 200 && code < 300 && mTo != null) {
-                sendAck();
+            if ("INVITE".equalsIgnoreCase(method) && code >= 200 && code < 300) {
+                onInviteResponse(msg, code);
             }
             return;
         }
@@ -344,12 +377,12 @@ final class WfcCallSession extends ImsCallSessionImplBase {
     private void onInviteResponse(SipMessage msg, int code) {
         mInviteAnswered = true;
         if (code < 200) {
-            if (code == 100) return;
             mProvisional = true;
             if (mCancelWanted) {
                 sendCancel();
                 return;
             }
+            if (code == 100) return;
             if (msg.body.contains("m=audio")) onRemoteSdp(msg.body);
             String rseq = msg.header("RSeq");
             String require = msg.header("Require");
@@ -364,26 +397,24 @@ final class WfcCallSession extends ImsCallSessionImplBase {
                 mListener.callSessionProgressing(mediaProfile());
             }
         } else if (code < 300) {
-            if (mState == State.ESTABLISHED || mState == State.TERMINATING) {
-                if (mTo != null) sendAck();
+            if (mTo == null) {
+                mTo = msg.header("To");
+                mRouteSet = routeSet(msg);
+                mRemoteTarget = SipMessage.uri(msg.header("Contact"));
+            }
+            sendAck();
+            if (mState == State.ESTABLISHED) return;
+            if (mState == State.TERMINATING || mState == State.TERMINATED || mCancelWanted) {
+                // Answered after we hung up: the dialog exists, so end it.
+                sendByeRequest();
                 return;
             }
-            mTo = msg.header("To");
-            mRouteSet = routeSet(msg);
-            mRemoteTarget = SipMessage.uri(msg.header("Contact"));
-            sendAck();
             if (msg.body.contains("m=audio")) onRemoteSdp(msg.body);
             mState = State.ESTABLISHED;
-            if (mCancelWanted) {
-                sendBye();
-                return;
-            }
             Log.i(TAG, "call answered");
             mOwner.useAndroidAudio();
-            if (mListener != null) {
-                mListener.callSessionInitiated(new ImsCallProfile(mProfile.getServiceType(),
-                        mProfile.getCallType(), mProfile.getCallExtras(), mediaProfile()));
-            }
+            scheduleSessionRefresh(msg.header("Session-Expires"));
+            reportStarted();
         } else {
             String ack = "ACK " + mRuri + " SIP/2.0\r\n" + via(mInviteBranch)
                     + "Max-Forwards: 70\r\nRoute: " + mInitialRoute + "\r\n"
@@ -403,6 +434,10 @@ final class WfcCallSession extends ImsCallSessionImplBase {
     /** In-dialog requests routed here by Call-ID. */
     void onRequest(SecAgreeChannel channel, SipMessage msg, InetSocketAddress from) {
         String method = msg.method().toUpperCase();
+        if ("ACK".equals(method) && mFinalRetransmit != null) {
+            mTx.removeCallbacks(mFinalRetransmit);
+            mFinalRetransmit = null;
+        }
         if (mState == State.TERMINATED) {
             if ("INVITE".equals(method) && mIncoming && mInviteReq != null
                     && msg.branch() != null && msg.branch().equals(mInviteReq.branch())) {
@@ -419,7 +454,7 @@ final class WfcCallSession extends ImsCallSessionImplBase {
                 return;
             case "CANCEL":
                 mReg.answer(channel, msg, from, 200, "OK");
-                if (mIncoming && mState == State.INITIATED) {
+                if (mIncoming && mState == State.INITIATED && mAnswer == null) {
                     respondInvite(487, "Request Terminated", null, null);
                     Log.i(TAG, "caller cancelled");
                     finish(reason(ImsReasonInfo.CODE_USER_TERMINATED_BY_REMOTE, "CANCEL"),
@@ -506,7 +541,13 @@ final class WfcCallSession extends ImsCallSessionImplBase {
         respondInvite(180, "Ringing", "Contact: " + mReg.contact() + "\r\n", null);
         Bundle extras = new Bundle();
         ImsCallSessionListener l = mOwner.notifyIncoming(this, extras);
-        if (l != null) mListener = l;
+        if (l == null) {
+            Log.w(TAG, "framework did not take the incoming call");
+            respondInvite(480, "Temporarily Unavailable", null, null);
+            finish(reason(ImsReasonInfo.CODE_LOCAL_INTERNAL_ERROR, "not taken"), false);
+            return true;
+        }
+        mListener = l;
         Log.i(TAG, "incoming call ringing");
         return true;
     }
@@ -529,8 +570,8 @@ final class WfcCallSession extends ImsCallSessionImplBase {
     private void sendAnswer() {
         if (mAcked || mState == State.TERMINATED) return;
         sendRaw(mAnswer);
-        if (mAnswerSends < ANSWER_RETRANSMIT_MS.length) {
-            mHandler.postDelayed(this::sendAnswer, ANSWER_RETRANSMIT_MS[mAnswerSends++]);
+        if (mAnswerSends < RETRANSMIT_MS.length) {
+            mHandler.postDelayed(this::sendAnswer, RETRANSMIT_MS[mAnswerSends++]);
         } else {
             Log.w(TAG, "no ACK for the answer");
             sendBye();
@@ -539,11 +580,42 @@ final class WfcCallSession extends ImsCallSessionImplBase {
 
     private void onAck() {
         mAcked = true;
+        if (mState != State.INITIATED) return;
         mState = State.ESTABLISHED;
+        reportStarted();
+    }
+
+    private void reportStarted() {
+        mStarted = true;
         if (mListener != null) {
             mListener.callSessionInitiated(new ImsCallProfile(mProfile.getServiceType(),
                     mProfile.getCallType(), mProfile.getCallExtras(), mediaProfile()));
         }
+    }
+
+    /** Ends the call without signalling, e.g. when the IMS registration is gone. */
+    void abort(String why) {
+        finish(reason(ImsReasonInfo.CODE_LOCAL_CALL_TERMINATED, why), !mIncoming && !mStarted);
+    }
+
+    /** RFC 4028: refresh with UPDATE when the 2xx makes us (the UAC) the refresher. */
+    private void scheduleSessionRefresh(String sessionExpires) {
+        if (sessionExpires == null) return;
+        String refresher = SipMessage.param(sessionExpires, "refresher");
+        if (!"uac".equalsIgnoreCase(refresher)) return;
+        final int seconds;
+        try {
+            seconds = Integer.parseInt(sessionExpires.split(";")[0].trim());
+        } catch (NumberFormatException e) {
+            return;
+        }
+        mHandler.postDelayed(() -> {
+            if (mState != State.ESTABLISHED) return;
+            sendInDialog("UPDATE", mRemoteTarget, mRouteSet, mTo, ++mCseq,
+                    "Session-Expires: " + seconds + ";refresher=uac\r\nSupported: timer\r\n"
+                            + "Contact: " + mReg.contact() + "\r\n");
+            scheduleSessionRefresh(sessionExpires);
+        }, seconds * 500L);
     }
 
     private void doReject(int code, String why) {
@@ -564,6 +636,18 @@ final class WfcCallSession extends ImsCallSessionImplBase {
         String r = buildInviteResponse(code, reason, extra, body);
         if (code > 100) mLastResponse = r;
         sendRaw(r);
+        if (code >= 300) {
+            final int[] n = {0};
+            mFinalRetransmit = new Runnable() {
+                @Override
+                public void run() {
+                    if (n[0] >= RETRANSMIT_MS.length || mFinalRetransmit != this) return;
+                    sendRaw(r);
+                    mTx.postDelayed(this, RETRANSMIT_MS[n[0]++]);
+                }
+            };
+            mTx.postDelayed(mFinalRetransmit, RETRANSMIT_MS[n[0]++]);
+        }
     }
 
     private String buildInviteResponse(int code, String reason, String extra, String body) {
@@ -628,6 +712,15 @@ final class WfcCallSession extends ImsCallSessionImplBase {
     }
 
     static WfcMedia.Params parseSdp(String sdp) {
+        try {
+            return parseSdpUnchecked(sdp);
+        } catch (RuntimeException e) {
+            Log.w(TAG, "bad SDP: " + e);
+            return null;
+        }
+    }
+
+    private static WfcMedia.Params parseSdpUnchecked(String sdp) {
         String conn = null;
         String media = null;
         for (String l : sdp.split("\r?\n")) {
@@ -725,17 +818,45 @@ final class WfcCallSession extends ImsCallSessionImplBase {
 
     private void sendBye() {
         mState = State.TERMINATING;
-        sendInDialog("BYE", mRemoteTarget, mRouteSet, mTo, ++mCseq, "");
+        sendByeRequest();
         mHandler.postDelayed(() -> finish(reason(ImsReasonInfo.CODE_USER_TERMINATED,
                 "BYE timed out"), false), BYE_TIMEOUT_MS);
     }
 
+    private void sendByeRequest() {
+        if (mByeSent || mTo == null) return;
+        mByeSent = true;
+        sendInDialog("BYE", mRemoteTarget, mRouteSet, mTo, ++mCseq, "");
+    }
+
+    /** Sends a non-INVITE request and retransmits it until a final response or timer F. */
+    private void sendReliably(String request, String key) {
+        if (!mReg.send(request)) return;
+        final int[] n = {0};
+        Runnable r = new Runnable() {
+            @Override
+            public void run() {
+                if (mPending.get(key) != this) return;
+                if (n[0] >= RETRANSMIT_MS.length) {
+                    mPending.remove(key);
+                    return;
+                }
+                mReg.send(request);
+                mTx.postDelayed(this, RETRANSMIT_MS[n[0]++]);
+            }
+        };
+        mPending.put(key, r);
+        mTx.postDelayed(r, RETRANSMIT_MS[n[0]++]);
+    }
+
     private void sendCancel() {
-        mReg.send("CANCEL " + mRuri + " SIP/2.0\r\n" + via(mInviteBranch)
+        if (mCancelSent) return;
+        mCancelSent = true;
+        sendReliably("CANCEL " + mRuri + " SIP/2.0\r\n" + via(mInviteBranch)
                 + "Max-Forwards: 70\r\nRoute: " + mInitialRoute + "\r\n"
                 + "From: <" + mReg.identity() + ">;tag=" + mTag + "\r\n"
                 + "To: <" + mRuri + ">\r\nCall-ID: " + mCallId + "\r\n"
-                + "CSeq: 1 CANCEL\r\nContent-Length: 0\r\n\r\n");
+                + "CSeq: 1 CANCEL\r\nContent-Length: 0\r\n\r\n", mInviteBranch + " CANCEL");
     }
 
     private void sendAck() {
@@ -746,7 +867,8 @@ final class WfcCallSession extends ImsCallSessionImplBase {
             int cseq, String extra) {
         StringBuilder sb = new StringBuilder();
         sb.append(method).append(' ').append(target).append(" SIP/2.0\r\n");
-        sb.append(via("z9hG4bK" + Registrar.hex(8)));
+        String branch = "z9hG4bK" + Registrar.hex(8);
+        sb.append(via(branch));
         sb.append("Max-Forwards: 70\r\n");
         for (String r : routes) sb.append("Route: ").append(r).append("\r\n");
         sb.append("From: ").append(localFrom()).append("\r\n");
@@ -755,7 +877,11 @@ final class WfcCallSession extends ImsCallSessionImplBase {
         sb.append("CSeq: ").append(cseq).append(' ').append(method).append("\r\n");
         sb.append(extra);
         sb.append("Content-Length: 0\r\n\r\n");
-        mReg.send(sb.toString());
+        if ("ACK".equals(method)) {
+            mReg.send(sb.toString());
+        } else {
+            sendReliably(sb.toString(), branch + " " + method);
+        }
     }
 
     private String localFrom() {

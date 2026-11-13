@@ -38,7 +38,7 @@ final class WfcMmTelFeature extends MmTelFeature
     private final Handler mHandler;
     private final int mSubId;
     private final ImsRegistrationImplBase mRegistration;
-    private Registrar mRegistrar;
+    private volatile Registrar mRegistrar;
     private ConnectivityManager.NetworkCallback mNetworkCallback;
     private Network mImsNetwork;
     private boolean mVoiceWlanEnabled;
@@ -277,9 +277,7 @@ final class WfcMmTelFeature extends MmTelFeature
 
     private void endCalls(String why) {
         for (WfcCallSession call : new ArrayList<>(mCalls.values())) {
-            if (call.isEnded()) continue;
-            call.finish(new ImsReasonInfo(ImsReasonInfo.CODE_LOCAL_CALL_TERMINATED, 0, why),
-                    call.getState() != ImsCallSessionImplBase.State.ESTABLISHED);
+            if (!call.isEnded()) call.abort(why);
         }
     }
 }
