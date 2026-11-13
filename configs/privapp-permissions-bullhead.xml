@@ -57,6 +57,12 @@
         <permission name="android.permission.WRITE_SECURE_SETTINGS"/>
     </privapp-permissions>
 
+    <privapp-permissions package="org.lineageos.bullhead.wfcims">
+        <permission name="android.permission.CONNECTIVITY_USE_RESTRICTED_NETWORKS"/>
+        <permission name="android.permission.READ_PRIVILEGED_PHONE_STATE"/>
+        <permission name="com.android.telephony.permission.USE_IMSMEDIA"/>
+    </privapp-permissions>
+
     <privapp-permissions package="com.android.omadm.service">
         <permission name="android.permission.CHANGE_CONFIGURATION"/>
         <permission name="android.permission.CONNECTIVITY_INTERNAL"/>

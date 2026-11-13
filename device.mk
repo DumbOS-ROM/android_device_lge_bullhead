@@ -507,4 +507,11 @@ PRODUCT_PACKAGES += \
     BullheadImsPhoneOverlay \
     BullheadImsWfcOverlay \
     ImsCompatBridge
+
+# Wi-Fi calling in Android, for a modem whose IKE cannot do SHA-2. Inert until the carrier
+# config names it, so shipping the package alone changes nothing.
+PRODUCT_PACKAGES += \
+    BullheadWfcIms \
+    ImsMediaService \
+    libimsmedia
 PRODUCT_PACKAGES += bullhead_gps_debug.conf

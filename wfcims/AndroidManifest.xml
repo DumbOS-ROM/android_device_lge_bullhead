@@ -18,6 +18,15 @@
         android:directBootAware="true"
         android:label="Wi-Fi calling">
         <service
+            android:name=".WfcQualifiedNetworks"
+            android:directBootAware="true"
+            android:exported="true"
+            android:permission="android.permission.BIND_TELEPHONY_DATA_SERVICE">
+            <intent-filter>
+                <action android:name="android.telephony.data.QualifiedNetworksService" />
+            </intent-filter>
+        </service>
+        <service
             android:name=".WfcImsService"
             android:directBootAware="true"
             android:exported="true"

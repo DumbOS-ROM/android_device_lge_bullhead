@@ -88,6 +88,8 @@ final class WfcMmTelFeature extends MmTelFeature
         if (enabled == mVoiceWlanEnabled) return;
         mVoiceWlanEnabled = enabled;
         Log.i(TAG, "voice over WLAN " + (enabled ? "enabled" : "disabled"));
+        // Lets the qualified networks service move the IMS APN to IWLAN, and only then.
+        WfcQualifiedNetworks.setVoiceWlanEnabled(enabled);
         if (enabled) {
             requestImsNetwork();
         } else {
