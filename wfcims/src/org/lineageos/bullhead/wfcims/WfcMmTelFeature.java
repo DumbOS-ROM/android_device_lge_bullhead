@@ -24,7 +24,6 @@ import android.telephony.ims.stub.ImsCallSessionImplBase;
 import android.telephony.ims.stub.ImsRegistrationImplBase;
 import android.util.Log;
 
-import java.net.InetSocketAddress;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Map;
@@ -189,7 +188,7 @@ final class WfcMmTelFeature extends MmTelFeature
     }
 
     @Override
-    public boolean onRequest(SecAgreeChannel channel, SipMessage msg, InetSocketAddress from) {
+    public boolean onRequest(SecAgreeChannel channel, SipMessage msg, SecAgreeChannel.Source from) {
         WfcCallSession call = mCalls.get(msg.header("Call-ID"));
         if (call != null) {
             call.onRequest(channel, msg, from);

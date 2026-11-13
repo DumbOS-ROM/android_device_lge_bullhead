@@ -15,7 +15,6 @@ import android.util.Log;
 
 import java.net.Inet6Address;
 import java.net.InetAddress;
-import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
@@ -36,7 +35,7 @@ final class Registrar implements SecAgreeChannel.Listener {
         void onDeregistered(String reason);
 
         /** A request other than REGISTER responses arrived; return true if handled. */
-        boolean onRequest(SecAgreeChannel channel, SipMessage msg, InetSocketAddress from);
+        boolean onRequest(SecAgreeChannel channel, SipMessage msg, SecAgreeChannel.Source from);
 
         /** A response to a request other than REGISTER arrived. */
         void onResponse(SipMessage msg);
@@ -253,7 +252,7 @@ final class Registrar implements SecAgreeChannel.Listener {
     }
 
     @Override
-    public void onMessage(SecAgreeChannel channel, SipMessage msg, InetSocketAddress from) {
+    public void onMessage(SecAgreeChannel channel, SipMessage msg, SecAgreeChannel.Source from) {
         if (channel != mChannel) return;
         if (!msg.isResponse()) {
             if (!mCallback.onRequest(channel, msg, from)) answer(channel, msg, from, 200, "OK");
@@ -328,13 +327,13 @@ final class Registrar implements SecAgreeChannel.Listener {
         mHandler.postDelayed(() -> sendRegister(REQUESTED_EXPIRES), expires * 500L);
     }
 
-    void answer(SecAgreeChannel channel, SipMessage req, InetSocketAddress to, int code,
+    void answer(SecAgreeChannel channel, SipMessage req, SecAgreeChannel.Source to, int code,
             String reason) {
         respond(channel, req, to, code, reason, null, null);
     }
 
     /** Answers a request; extra is whole header lines, body is SDP when not null. */
-    void respond(SecAgreeChannel channel, SipMessage req, InetSocketAddress to, int code,
+    void respond(SecAgreeChannel channel, SipMessage req, SecAgreeChannel.Source to, int code,
             String reason, String extra, String body) {
         if ("ACK".equalsIgnoreCase(req.method())) return;
         StringBuilder sb = new StringBuilder("SIP/2.0 ").append(code).append(' ').append(reason)

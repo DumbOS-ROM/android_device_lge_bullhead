@@ -81,7 +81,7 @@ final class WfcCallSession extends ImsCallSessionImplBase {
     private final boolean mIncoming;
     private SipMessage mInviteReq;
     private SecAgreeChannel mInviteChannel;
-    private InetSocketAddress mInviteSource;
+    private SecAgreeChannel.Source mInviteSource;
     private WfcMedia.Params mOffer;
     private String mLastResponse;
     private String mAnswer;
@@ -432,7 +432,7 @@ final class WfcCallSession extends ImsCallSessionImplBase {
     }
 
     /** In-dialog requests routed here by Call-ID. */
-    void onRequest(SecAgreeChannel channel, SipMessage msg, InetSocketAddress from) {
+    void onRequest(SecAgreeChannel channel, SipMessage msg, SecAgreeChannel.Source from) {
         String method = msg.method().toUpperCase();
         if ("ACK".equals(method) && mFinalRetransmit != null) {
             mTx.removeCallbacks(mFinalRetransmit);
@@ -501,7 +501,8 @@ final class WfcCallSession extends ImsCallSessionImplBase {
     }
 
     /** Answers a new INVITE with 100 and 180, then reports the call; false if refused. */
-    boolean onInitialInvite(SecAgreeChannel channel, SipMessage invite, InetSocketAddress from) {
+    boolean onInitialInvite(SecAgreeChannel channel, SipMessage invite,
+            SecAgreeChannel.Source from) {
         mInviteReq = invite;
         mInviteChannel = channel;
         mInviteSource = from;
