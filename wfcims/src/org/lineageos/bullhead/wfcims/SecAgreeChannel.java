@@ -35,8 +35,12 @@ import java.util.List;
  */
 final class SecAgreeChannel implements AutoCloseable {
     private static final String TAG = "WfcIms";
-    /** Whole-message tracing for bring-up; never on a user build, the text carries identities. */
-    private static final boolean LOG_SIP = Build.IS_DEBUGGABLE;
+    /**
+     * Whole-message tracing. The text carries subscriber identities, so it is off unless someone
+     * asks for it on a debuggable build: {@code setprop log.tag.WfcImsSip VERBOSE}.
+     */
+    private static final boolean LOG_SIP =
+            Build.IS_DEBUGGABLE && Log.isLoggable("WfcImsSip", Log.VERBOSE);
     private static final int MAX_MESSAGE = 65536;
 
     interface Listener {

@@ -18,7 +18,10 @@ import java.net.InetAddress;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /** IMS registration over one IMS network, with IMS-AKA and sec-agree. Runs on its handler. */
 final class Registrar implements SecAgreeChannel.Listener {
@@ -26,6 +29,7 @@ final class Registrar implements SecAgreeChannel.Listener {
     private static final int REQUESTED_EXPIRES = 3600;
     private static final long RETRY_MS = 60_000;
     private static final long[] RETRANSMIT_MS = {500, 1000, 2000, 4000};
+    private static final int SUBSCRIBE_EXPIRES = 600000;
 
     interface Callback {
         void onRegistering();
@@ -64,6 +68,13 @@ final class Registrar implements SecAgreeChannel.Listener {
     private String mOpaque;
     private byte[] mRes;
     private int mNc;
+    private String mInstanceId;
+    private final List<String> mServiceRoute = new ArrayList<>();
+    private String mSubCallId;
+    private String mSubTag;
+    private String mSubBranch;
+    private int mSubCseq;
+    private boolean mSubscribed;
 
     Registrar(Context context, Handler handler, ImsIdentity id, Callback callback) {
         mContext = context;
@@ -111,8 +122,9 @@ final class Registrar implements SecAgreeChannel.Listener {
     }
 
     String contact() {
-        return "<sip:" + mId.user + "@" + localHost() + ":" + localPort()
-                + ">;+g.3gpp.icsi-ref=\"urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel\"";
+        return "<sip:" + mId.user + "@" + localHost() + ":" + localPort() + ">"
+                + (mInstanceId != null ? ";+sip.instance=\"<" + mInstanceId + ">\"" : "")
+                + ";+g.3gpp.icsi-ref=\"urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel\";audio";
     }
 
     /** Sends a request to the P-CSCF over the protected channel; false if that failed. */
@@ -181,6 +193,10 @@ final class Registrar implements SecAgreeChannel.Listener {
         mTag = hex(4);
         mCseq = 0;
         mNonce = null;
+        mInstanceId = mId.instanceId();
+        mServiceRoute.clear();
+        mSubscribed = false;
+        mSubCallId = null;
         mCallback.onRegistering();
         sendRegister(REQUESTED_EXPIRES);
     }
@@ -211,8 +227,7 @@ final class Registrar implements SecAgreeChannel.Listener {
                 + "To: <" + mId.impu + ">\r\n"
                 + "Call-ID: " + mCallId + "\r\n"
                 + "CSeq: " + (++mCseq) + " REGISTER\r\n"
-                + "Contact: <sip:" + mId.user + "@" + host + ":" + portS + ">;"
-                + "+g.3gpp.icsi-ref=\"urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel\";+g.3gpp.smsip\r\n"
+                + "Contact: " + contact() + "\r\n"
                 + "Expires: " + expires + "\r\n"
                 + "Authorization: " + auth + "\r\n"
                 + "Security-Client: " + mChannel.securityClient() + "\r\n"
@@ -255,7 +270,18 @@ final class Registrar implements SecAgreeChannel.Listener {
     public void onMessage(SecAgreeChannel channel, SipMessage msg, SecAgreeChannel.Source from) {
         if (channel != mChannel) return;
         if (!msg.isResponse()) {
+            if (mSubCallId != null && mSubCallId.equals(msg.header("Call-ID"))
+                    && "NOTIFY".equalsIgnoreCase(msg.method())) {
+                answer(channel, msg, from, 200, "OK");
+                onRegNotify(msg);
+                return;
+            }
             if (!mCallback.onRequest(channel, msg, from)) answer(channel, msg, from, 200, "OK");
+            return;
+        }
+        if ("SUBSCRIBE".equalsIgnoreCase(msg.method())
+                && mSubCallId != null && mSubCallId.equals(msg.header("Call-ID"))) {
+            onSubscribeResponse(msg);
             return;
         }
         if (!"REGISTER".equalsIgnoreCase(msg.method())) {
@@ -320,11 +346,91 @@ final class Registrar implements SecAgreeChannel.Listener {
         mExpires = expires;
         String pau = msg.header("P-Associated-URI");
         mIdentity = pau != null ? SipMessage.uri(pau) : mId.impu;
+        mServiceRoute.clear();
+        for (String v : msg.headerValues("Service-Route")) {
+            Matcher m = Pattern.compile("<[^>]+>").matcher(v);
+            while (m.find()) mServiceRoute.add(m.group());
+        }
         boolean first = !mRegistered;
         mRegistered = true;
-        Log.i(TAG, "registered for " + expires + " s");
+        Log.i(TAG, "registered for " + expires + " s, service route " + mServiceRoute);
         if (first) mCallback.onRegistered(mIdentity);
+        if (!mSubscribed) {
+            mSubscribed = true;
+            sendSubscribe(SUBSCRIBE_EXPIRES);
+        }
         mHandler.postDelayed(() -> sendRegister(REQUESTED_EXPIRES), expires * 500L);
+    }
+
+    /**
+     * Subscribes to our own registration state (TS 24.229 5.1.1.3). The network uses it to tell
+     * us when a binding goes away; a failure here never disturbs the registration itself.
+     */
+    private void sendSubscribe(int expires) {
+        if (mChannel == null || !mChannel.isProtected()) return;
+        if (mSubCallId == null) {
+            mSubCallId = hex(12) + "@wfcims";
+            mSubTag = hex(4);
+            mSubCseq = 0;
+        }
+        mSubBranch = "z9hG4bK" + hex(8);
+        StringBuilder sb = new StringBuilder();
+        sb.append("SUBSCRIBE ").append(mIdentity).append(" SIP/2.0\r\n");
+        sb.append("Via: SIP/2.0/UDP ").append(localHost()).append(':').append(localPort())
+                .append(";branch=").append(mSubBranch).append(";rport\r\n");
+        sb.append("Max-Forwards: 70\r\n");
+        sb.append("Route: ").append(initialRoute()).append("\r\n");
+        for (String r : mServiceRoute) sb.append("Route: ").append(r).append("\r\n");
+        sb.append("From: <").append(mIdentity).append(">;tag=").append(mSubTag).append("\r\n");
+        sb.append("To: <").append(mIdentity).append(">\r\n");
+        sb.append("Call-ID: ").append(mSubCallId).append("\r\n");
+        sb.append("CSeq: ").append(++mSubCseq).append(" SUBSCRIBE\r\n");
+        sb.append("Event: reg\r\n");
+        sb.append("Expires: ").append(expires).append("\r\n");
+        sb.append("Accept: application/reginfo+xml\r\n");
+        sb.append("Contact: ").append(contact()).append("\r\n");
+        sb.append("Security-Verify: ").append(mChannel.securityVerify()).append("\r\n");
+        sb.append("Require: sec-agree\r\nProxy-Require: sec-agree\r\n");
+        sb.append("P-Access-Network-Info: IEEE-802.11\r\n");
+        sb.append("Content-Length: 0\r\n\r\n");
+        if (!send(sb.toString())) Log.w(TAG, "could not send the reg-event SUBSCRIBE");
+    }
+
+    private void onSubscribeResponse(SipMessage msg) {
+        int code = msg.code();
+        if (code < 200) return;
+        if (code >= 300) {
+            Log.w(TAG, "reg-event subscription refused: " + msg.startLine);
+            return;
+        }
+        int expires = 0;
+        String e = msg.header("Expires");
+        if (e != null) {
+            try {
+                expires = Integer.parseInt(e.trim());
+            } catch (NumberFormatException ignored) {
+                // Keep 0: the NOTIFY's Subscription-State carries the authoritative value.
+            }
+        }
+        Log.i(TAG, "subscribed to our registration state for " + expires + " s");
+        if (expires > 60) {
+            mHandler.postDelayed(() -> {
+                if (mRegistered) sendSubscribe(SUBSCRIBE_EXPIRES);
+            }, expires * 500L);
+        }
+    }
+
+    /** Logs what the network says about our bindings; acting on it is left for later. */
+    private void onRegNotify(SipMessage msg) {
+        Matcher m = Pattern.compile("state=\"([a-z]+)\"[^>]*(?:event=\"([a-z]+)\")?")
+                .matcher(msg.body);
+        StringBuilder states = new StringBuilder();
+        while (m.find()) {
+            states.append(m.group(1));
+            if (m.group(2) != null) states.append('/').append(m.group(2));
+            states.append(' ');
+        }
+        Log.i(TAG, "registration state notified: " + states.toString().trim());
     }
 
     void answer(SecAgreeChannel channel, SipMessage req, SecAgreeChannel.Source to, int code,

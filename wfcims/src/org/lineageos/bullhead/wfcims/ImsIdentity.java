@@ -34,6 +34,20 @@ final class ImsIdentity {
         impu = "sip:" + imsi + "@" + domain;
     }
 
+    /** GSMA instance id built from the IMEI, or null when there is none. */
+    String instanceId() {
+        String imei;
+        try {
+            imei = mTm.getImei();
+        } catch (RuntimeException e) {
+            Log.w(TAG, "no IMEI for the instance id: " + e);
+            return null;
+        }
+        if (imei == null || imei.length() < 15) return null;
+        return "urn:gsma:imei:" + imei.substring(0, 8) + "-" + imei.substring(8, 14) + "-"
+                + imei.substring(14, 15);
+    }
+
     /** Runs USIM AKA on a SIP AKAv1 nonce. Returns {RES, CK, IK}, or null on failure. */
     byte[][] aka(String nonce) {
         byte[] n = Base64.decode(nonce, Base64.DEFAULT);
