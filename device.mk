@@ -501,16 +501,17 @@ PRODUCT_PACKAGES += libbullhead_ims_surface
 PRODUCT_PACKAGES += libbullhead_ril_audio
 PRODUCT_PACKAGES += libbullhead_cne_parcel
 
-# Opt-in VoLTE through the IMS compat bridge, off until both overlays are enabled.
-# BullheadImsWfcOverlay adds Wi-Fi calling on top of it.
+# IMS. The phone and Wi-Fi calling overlays are static: they select BullheadWfcIms, which
+# serves the modem's IMS as well, and offer the Wi-Fi calling switch, off until the user
+# turns it on. VoLTE also needs the modem's IMS settings, so its framework overlay stays
+# opt-in.
 PRODUCT_PACKAGES += \
     BullheadImsFrameworkOverlay \
     BullheadImsPhoneOverlay \
     BullheadImsWfcOverlay \
     ImsCompatBridge
 
-# Wi-Fi calling in Android, for a modem whose IKE cannot do SHA-2. The phone and Wi-Fi
-# calling overlays select it, so nothing runs until both are enabled.
+# Wi-Fi calling in Android, for a modem whose IKE cannot do SHA-2.
 PRODUCT_PACKAGES += \
     BullheadWfcIms \
     ImsMediaService \

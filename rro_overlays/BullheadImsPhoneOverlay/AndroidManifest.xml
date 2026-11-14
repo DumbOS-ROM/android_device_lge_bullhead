@@ -9,6 +9,6 @@
     <application android:hasCode="false" />
     <overlay
         android:targetPackage="com.android.phone"
-        android:isStatic="false"
+        android:isStatic="true"
         android:priority="0" />
 </manifest>
