@@ -382,16 +382,26 @@ final class WfcMmTelFeature extends MmTelFeature
 
     @Override
     public int shouldProcessCall(String[] numbers) {
-        if (!wifiRegistered() && !mLegacy.isRegistered()) return PROCESS_CALL_CSFB;
         TelephonyManager tm = mContext.getSystemService(TelephonyManager.class);
+        boolean emergency = false;
         for (String n : numbers) {
             try {
-                if (tm.isEmergencyNumber(n)) return PROCESS_CALL_CSFB;
+                emergency |= tm.isEmergencyNumber(n);
             } catch (RuntimeException e) {
+                // Cannot tell, so take the path that always works.
                 return PROCESS_CALL_CSFB;
             }
         }
-        return PROCESS_CALL_IMS;
+        if (emergency) {
+            // Only the modem can carry these: it registers for emergency service, gives the
+            // network a location and handles callback mode afterwards. Our Wi-Fi stack does
+            // none of that, so while Wi-Fi is carrying us an emergency call goes to the
+            // circuit-switched network instead. Telephony retries there by itself if the
+            // modem's attempt fails.
+            return !wifiRegistered() && mLegacy.isRegistered()
+                    ? PROCESS_CALL_IMS : PROCESS_CALL_CSFB;
+        }
+        return wifiRegistered() || mLegacy.isRegistered() ? PROCESS_CALL_IMS : PROCESS_CALL_CSFB;
     }
 
     @Override
