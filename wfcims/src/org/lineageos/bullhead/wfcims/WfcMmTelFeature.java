@@ -259,21 +259,31 @@ final class WfcMmTelFeature extends MmTelFeature
     }
 
     /** The modem's provisioning, or null before the legacy service is up. */
-    ImsConfigImplBase legacyConfig() {
+    IImsConfig legacyConfig() {
         try {
-            IImsConfig config = mLegacy.getConfig();
-            return config == null ? null : new WfcLegacyConfig(config);
+            return mLegacy.getConfig();
         } catch (RemoteException e) {
             Log.w(TAG, "legacy config: " + e);
             return null;
         }
     }
 
+    void enableModemIms() {
+        mLegacy.turnOn();
+    }
+
+    void disableModemIms() {
+        mLegacy.turnOff();
+    }
+
     @Override
     public ImsUtImplBase getUt() {
         try {
-            IImsUt ut = mLegacy.getUt();
-            if (ut == null) return super.getUt();
+            IImsUt legacyUt = mLegacy.getUt();
+            if (legacyUt == null) return super.getUt();
+            // Wrapped: ims.apk shares one ImsUtImpl that close() breaks for good, and the
+            // framework closes its Ut whenever the feature is re-added.
+            IImsUt ut = new WfcLegacyUt(legacyUt);
             return new ImsUtImplBase() {
                 @Override
                 public IImsUt getInterface() {
@@ -292,14 +302,16 @@ final class WfcMmTelFeature extends MmTelFeature
 
     @Override
     public void onRegistering() {
-        mRegistration.onRegistering(ImsRegistrationImplBase.REGISTRATION_TECH_IWLAN);
+        // Never while the modem is carrying us: ImsPhone treats it as out of service.
+        if (!mLegacy.isRegistered()) {
+            mReportedTech = -1;
+            mRegistration.onRegistering(ImsRegistrationImplBase.REGISTRATION_TECH_IWLAN);
+        }
     }
 
     @Override
     public void onRegistered(String identity) {
-        Log.i(TAG, "registered over IWLAN");
-        mRegistration.onRegistered(ImsRegistrationImplBase.REGISTRATION_TECH_IWLAN);
-        updateCapabilities();
+        updateRegistration();
     }
 
     @Override
@@ -351,8 +363,7 @@ final class WfcMmTelFeature extends MmTelFeature
 
     @Override
     public int shouldProcessCall(String[] numbers) {
-        Registrar reg = mRegistrar;
-        if (reg == null || !reg.isRegistered()) return PROCESS_CALL_CSFB;
+        if (!wifiRegistered() && !mLegacy.isRegistered()) return PROCESS_CALL_CSFB;
         TelephonyManager tm = mContext.getSystemService(TelephonyManager.class);
         for (String n : numbers) {
             try {
@@ -366,7 +377,25 @@ final class WfcMmTelFeature extends MmTelFeature
 
     @Override
     public ImsCallProfile createCallProfile(int callSessionType, int callType) {
+        if (!wifiRegistered() && mLegacy.isRegistered()) {
+            ImsCallProfile profile = mLegacy.createCallProfile(callSessionType, callType);
+            if (profile != null) return profile;
+        }
         return new ImsCallProfile(callSessionType, callType);
+    }
+
+    /**
+     * Cellular calls are the modem's own sessions, passed through as they are. Overridden here
+     * rather than in createCallSession so the legacy binder is returned untouched.
+     */
+    @Override
+    public IImsCallSession createCallSessionInterface(ImsCallProfile profile)
+            throws RemoteException {
+        if (!wifiRegistered() && mLegacy.isRegistered()) {
+            Log.i(TAG, "placing the call through the modem");
+            return mLegacy.createCallSession(profile);
+        }
+        return super.createCallSessionInterface(profile);
     }
 
     @Override

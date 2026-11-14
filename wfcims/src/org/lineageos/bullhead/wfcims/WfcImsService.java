@@ -21,6 +21,7 @@ public class WfcImsService extends ImsService {
 
     private final SparseArray<ImsRegistrationImplBase> mRegistrations = new SparseArray<>();
     private final SparseArray<WfcMmTelFeature> mFeatures = new SparseArray<>();
+    private final SparseArray<ImsConfigImplBase> mConfigs = new SparseArray<>();
     private HandlerThread mThread;
 
     private synchronized HandlerThread thread() {
@@ -67,9 +68,38 @@ public class WfcImsService extends ImsService {
 
     @Override
     public synchronized ImsConfigImplBase getConfig(int slotId) {
-        WfcMmTelFeature f = mFeatures.get(slotId);
-        ImsConfigImplBase config = f != null ? f.legacyConfig() : null;
-        return config != null ? config : super.getConfig(slotId);
+        ImsConfigImplBase config = mConfigs.get(slotId);
+        if (config == null) {
+            // Resolved per call: the framework asks for this before the feature has reached the
+            // vendor service, and keeps whatever it is given.
+            config = new WfcLegacyConfig(() -> {
+                WfcMmTelFeature f;
+                synchronized (WfcImsService.this) {
+                    f = mFeatures.get(slotId);
+                }
+                return f != null ? f.legacyConfig() : null;
+            });
+            mConfigs.put(slotId, config);
+        }
+        return config;
+    }
+
+    @Override
+    public void enableImsForSubscription(int slotId, int subscriptionId) {
+        WfcMmTelFeature f;
+        synchronized (this) {
+            f = mFeatures.get(slotId);
+        }
+        if (f != null) f.enableModemIms();
+    }
+
+    @Override
+    public void disableImsForSubscription(int slotId, int subscriptionId) {
+        WfcMmTelFeature f;
+        synchronized (this) {
+            f = mFeatures.get(slotId);
+        }
+        if (f != null) f.disableModemIms();
     }
 
     @Override

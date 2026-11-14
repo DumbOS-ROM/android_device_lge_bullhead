@@ -22,6 +22,9 @@ import android.telephony.ims.feature.MmTelFeature.MmTelCapabilities;
 import android.telephony.ims.stub.ImsRegistrationImplBase;
 import android.util.Log;
 
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+
 import com.android.ims.internal.IImsCallSession;
 import com.android.ims.internal.IImsConfig;
 import com.android.ims.internal.IImsRegistrationListener;
@@ -64,8 +67,10 @@ final class WfcLegacyIms {
     private final Callback mCallback;
     private volatile IImsService mLegacy;
     private volatile boolean mRegistered;
-    private int mServiceId = -1;
-    private boolean mStarted;
+    private volatile int mServiceId = -1;
+    private volatile boolean mStarted;
+    /** LTE capability requests, replayed whenever the vendor service comes back. */
+    private final Map<Integer, Boolean> mWantedFeatures = new ConcurrentHashMap<>();
 
     private final IBinder.DeathRecipient mDeath = new IBinder.DeathRecipient() {
         @Override
@@ -75,7 +80,7 @@ final class WfcLegacyIms {
             mServiceId = -1;
             setRegistered(false, new ImsReasonInfo(ImsReasonInfo.CODE_LOCAL_IMS_SERVICE_DOWN, 0,
                     "legacy ims service died"));
-            if (mStarted) connect();
+            if (mStarted) waitAndAttach();
         }
     };
 
@@ -103,6 +108,11 @@ final class WfcLegacyIms {
         @Override
         public void registrationConnected() {
             setRegistered(true, null);
+        }
+
+        private boolean gone() {
+            // The legacy interface cannot remove a listener, so a stopped feature must be quiet.
+            return !mStarted;
         }
 
         @Override
@@ -138,6 +148,7 @@ final class WfcLegacyIms {
         @Override
         public void registrationFeatureCapabilityChanged(int serviceClass, int[] enabledFeatures,
                 int[] disabledFeatures) {
+            if (gone()) return;
             mCallback.onLegacyCapabilities(convertCapabilities(enabledFeatures));
         }
 
@@ -178,7 +189,7 @@ final class WfcLegacyIms {
         connect();
     }
 
-    void stop() {
+    synchronized void stop() {
         if (!mStarted) return;
         mStarted = false;
         try {
@@ -196,8 +207,9 @@ final class WfcLegacyIms {
         }
         mServiceId = -1;
         mLegacy = null;
-        setRegistered(false, new ImsReasonInfo(ImsReasonInfo.CODE_LOCAL_IMS_SERVICE_DOWN, 0,
-                "stopped"));
+        // The feature is going away; nothing to tell it, and its registration object is shared
+        // with whatever feature replaces it.
+        mRegistered = false;
     }
 
     // ims.apk publishes the service from its boot receiver, possibly after we are bound.
@@ -207,13 +219,28 @@ final class WfcLegacyIms {
             attach(binder);
             return;
         }
+        waitAndAttach();
+    }
+
+    /** Waits off the caller's thread, and keeps waiting if the binder dies as we attach. */
+    private void waitAndAttach() {
         new Thread(() -> {
-            IBinder waited = ServiceManager.waitForService(LEGACY_SERVICE);
-            if (waited == null) {
-                Log.e(TAG, "the legacy ims service never appeared");
-                return;
+            while (mStarted && mLegacy == null) {
+                IBinder waited = ServiceManager.waitForService(LEGACY_SERVICE);
+                if (waited == null) {
+                    Log.e(TAG, "the legacy ims service never appeared");
+                    return;
+                }
+                attach(waited);
+                if (mStarted && mLegacy == null) {
+                    // waitForService hands back the same dead binder; do not spin on it.
+                    try {
+                        Thread.sleep(1000);
+                    } catch (InterruptedException e) {
+                        return;
+                    }
+                }
             }
-            if (mStarted) attach(waited);
         }, "WfcImsLegacy").start();
     }
 
@@ -235,6 +262,9 @@ final class WfcLegacyIms {
             mServiceId = service.open(mSlotId, SERVICE_CLASS_MMTEL, pending, mListener);
             service.addRegistrationListener(mSlotId, SERVICE_CLASS_MMTEL, mListener);
             Log.i(TAG, "modem IMS session " + mServiceId + " open for slot " + mSlotId);
+            for (Map.Entry<Integer, Boolean> e : mWantedFeatures.entrySet()) {
+                pushFeature(e.getKey(), e.getValue());
+            }
         } catch (RemoteException e) {
             Log.e(TAG, "opening the legacy session: " + e);
             mLegacy = null;
@@ -242,12 +272,16 @@ final class WfcLegacyIms {
     }
 
     private void setRegistered(boolean registered, ImsReasonInfo reason) {
+        // A stopped feature must stay quiet: the legacy interface cannot remove our listener and
+        // the registration object is shared with the feature that replaces us.
+        if (!mStarted) return;
         if (mRegistered == registered) return;
         mRegistered = registered;
         Log.i(TAG, "modem IMS " + (registered ? "registered" : "deregistered"));
         if (registered) {
             mCallback.onLegacyRegistered();
         } else {
+            mCallback.onLegacyCapabilities(new MmTelCapabilities());
             mCallback.onLegacyDeregistered(reason != null ? reason
                     : new ImsReasonInfo(ImsReasonInfo.CODE_REGISTRATION_ERROR, 0, "deregistered"));
         }
@@ -289,6 +323,11 @@ final class WfcLegacyIms {
                                 ? FEATURE_TYPE_VIDEO_OVER_LTE : -1)
                 : -1;
         if (feature < 0) return;
+        mWantedFeatures.put(feature, enabled);
+        pushFeature(feature, enabled);
+    }
+
+    private void pushFeature(int feature, boolean enabled) {
         try {
             IImsConfig config = getConfig();
             if (config == null) return;
@@ -296,6 +335,7 @@ final class WfcLegacyIms {
                     enabled ? 1 : 0, null);
             Log.i(TAG, "modem feature " + feature + (enabled ? " enabled" : " disabled"));
         } catch (RemoteException e) {
+            // Kept in mWantedFeatures and replayed once the vendor service is back.
             Log.w(TAG, "setFeatureValue: " + e);
         }
     }
