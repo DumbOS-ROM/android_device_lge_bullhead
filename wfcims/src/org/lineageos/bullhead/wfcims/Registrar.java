@@ -118,7 +118,7 @@ final class Registrar implements SecAgreeChannel.Listener {
      * Sends a SIP MESSAGE carrying an SMS relay message to the service centre, or back to
      * whoever delivered one. False when there is no registration to send it over.
      */
-    String sendSms(byte[] rp, String requestUri) {
+    String sendSms(byte[] rp, String requestUri, String inReplyTo) {
         if (mChannel == null || !mChannel.isProtected() || mIdentity == null) return null;
         String target = requestUri != null ? requestUri : mIdentity;
         StringBuilder sb = new StringBuilder();
@@ -135,6 +135,8 @@ final class Registrar implements SecAgreeChannel.Listener {
         sb.append("CSeq: ").append(++mSmsCseq).append(" MESSAGE\r\n");
         sb.append("P-Preferred-Identity: <").append(mIdentity).append(">\r\n");
         sb.append("Request-Disposition: no-fork\r\n");
+        // TS 24.341: an acknowledgement names the delivery it answers.
+        if (inReplyTo != null) sb.append("In-Reply-To: ").append(inReplyTo).append("\r\n");
         sb.append("P-Access-Network-Info: IEEE-802.11\r\n");
         sb.append("Security-Verify: ").append(mChannel.securityVerify()).append("\r\n");
         sb.append("Require: sec-agree\r\nProxy-Require: sec-agree\r\n");

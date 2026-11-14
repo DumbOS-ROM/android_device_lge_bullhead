@@ -57,10 +57,12 @@ final class WfcSms extends ImsSmsImplBase {
     private static final class Delivery {
         final int reference;
         final String target;
+        final String callId;
 
-        Delivery(int reference, String target) {
+        Delivery(int reference, String target, String callId) {
             this.reference = reference;
             this.target = target;
+            this.callId = callId;
         }
     }
 
@@ -120,7 +122,7 @@ final class WfcSms extends ImsSmsImplBase {
             rp = WfcSmsRp.encodeData(reference, number, pdu);
             target = "tel:" + number;
         }
-        String callId = reg.sendSms(rp, target);
+        String callId = reg.sendSms(rp, target, null);
         if (callId == null) {
             fallback(token, messageRef);
             return;
@@ -157,7 +159,8 @@ final class WfcSms extends ImsSmsImplBase {
                 int token = mIncomingToken.incrementAndGet();
                 String sender = SipMessage.uri(msg.header("P-Asserted-Identity"));
                 if (sender == null) sender = SipMessage.uri(msg.header("From"));
-                mToAcknowledge.put(token, new Delivery(in.reference, sender));
+                mToAcknowledge.put(token, new Delivery(in.reference, sender,
+                        msg.header("Call-ID")));
                 Log.i(TAG, "SMS received over Wi-Fi, reference " + in.reference);
                 try {
                     onSmsReceived(token, SmsMessage.FORMAT_3GPP, in.tpdu);
@@ -234,7 +237,7 @@ final class WfcSms extends ImsSmsImplBase {
                     ? WfcSmsRp.encodeAck(d.reference)
                     : WfcSmsRp.encodeError(d.reference,
                             result == DELIVER_STATUS_ERROR_NO_MEMORY ? 22 : 111);
-            registrar().sendSms(rp, d.target);
+            registrar().sendSms(rp, d.target, d.callId);
         });
     }
 
@@ -242,7 +245,9 @@ final class WfcSms extends ImsSmsImplBase {
     public void acknowledgeSmsReport(int token, int messageRef, int result) {
         mHandler.post(() -> {
             Delivery d = mToAcknowledge.remove(token);
-            if (d != null) registrar().sendSms(WfcSmsRp.encodeAck(d.reference), d.target);
+            if (d != null) {
+                registrar().sendSms(WfcSmsRp.encodeAck(d.reference), d.target, d.callId);
+            }
         });
     }
 
