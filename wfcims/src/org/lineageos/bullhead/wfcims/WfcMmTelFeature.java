@@ -63,6 +63,7 @@ final class WfcMmTelFeature extends MmTelFeature
     private MmTelCapabilities mLegacyCaps = new MmTelCapabilities();
     private int mReportedTech = -1;
     private WfcSms mSms;
+    private final WfcTrial mTrial;
 
     WfcMmTelFeature(Context context, Looper looper, int slotId, int subId,
             ImsRegistrationImplBase reg) {
@@ -71,6 +72,7 @@ final class WfcMmTelFeature extends MmTelFeature
         mSubId = subId;
         mRegistration = reg;
         mLegacy = new WfcLegacyIms(context, slotId, this);
+        mTrial = new WfcTrial(context, mHandler, subId);
     }
 
     @Override
@@ -126,6 +128,7 @@ final class WfcMmTelFeature extends MmTelFeature
         // Lets the qualified networks service move the IMS APN to IWLAN, and only then.
         WfcQualifiedNetworks.setVoiceWlanEnabled(enabled);
         if (enabled) {
+            mTrial.start();
             requestImsNetwork();
         } else {
             releaseImsNetwork();
@@ -165,6 +168,7 @@ final class WfcMmTelFeature extends MmTelFeature
     }
 
     private void releaseImsNetwork() {
+        mTrial.stop();
         endCalls("IMS network released");
         WfcQualifiedNetworks.setVoiceWlanEnabled(false);
         if (mRegistrar != null) {
@@ -338,7 +342,13 @@ final class WfcMmTelFeature extends MmTelFeature
 
     @Override
     public void onRegistered(String identity) {
+        mTrial.onRegistered();
         updateRegistration();
+    }
+
+    @Override
+    public void onRegistrationFailed(boolean refused) {
+        mTrial.onRegistrationFailed(refused);
     }
 
     @Override

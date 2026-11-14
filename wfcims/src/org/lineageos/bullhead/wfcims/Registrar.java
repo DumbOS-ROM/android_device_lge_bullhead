@@ -38,6 +38,9 @@ final class Registrar implements SecAgreeChannel.Listener {
 
         void onDeregistered(String reason);
 
+        /** A registration attempt failed; refused when the network answered with a refusal. */
+        void onRegistrationFailed(boolean refused);
+
         /** A request other than REGISTER responses arrived; return true if handled. */
         boolean onRequest(SecAgreeChannel channel, SipMessage msg, SecAgreeChannel.Source from);
 
@@ -244,10 +247,15 @@ final class Registrar implements SecAgreeChannel.Listener {
     }
 
     private void fail(String reason) {
+        fail(reason, false);
+    }
+
+    private void fail(String reason, boolean refused) {
         Log.w(TAG, "registration failed: " + reason);
         closeChannel();
         mRegistered = false;
         mCallback.onDeregistered(reason);
+        mCallback.onRegistrationFailed(refused);
         if (!mStopping) mHandler.postDelayed(this::startFresh, RETRY_MS);
     }
 
@@ -340,7 +348,8 @@ final class Registrar implements SecAgreeChannel.Listener {
         } else if (code >= 200 && code < 300) {
             onRegisterOk(msg);
         } else {
-            fail("REGISTER " + msg.startLine);
+            // 403 and 404 say this subscriber may not register here; anything else may pass.
+            fail("REGISTER " + msg.startLine, code == 403 || code == 404);
         }
     }
 
@@ -362,7 +371,7 @@ final class Registrar implements SecAgreeChannel.Listener {
         mNc = 0;
         byte[][] aka = mId.aka(mNonce);
         if (aka == null) {
-            fail("AKA failed");
+            fail("AKA failed", true);
             return;
         }
         mRes = aka[0];

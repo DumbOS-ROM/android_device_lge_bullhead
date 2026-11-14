@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+     SPDX-FileCopyrightText: 2026 Romain Théry
+     SPDX-License-Identifier: Apache-2.0
+-->
+<resources>
+    <string name="wfc_trial_refused">Wi-Fi calling isn\'t available with %1$s on this phone, so it was turned off</string>
+    <string name="wfc_trial_unreachable">Couldn\'t reach %1$s over this Wi-Fi network, so Wi-Fi calling was turned off</string>
+    <string name="wfc_trial_your_carrier">your carrier</string>
+</resources>
