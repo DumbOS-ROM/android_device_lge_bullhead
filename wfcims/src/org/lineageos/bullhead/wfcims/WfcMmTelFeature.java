@@ -87,7 +87,8 @@ final class WfcMmTelFeature extends MmTelFeature
     @Override
     public boolean queryCapabilityConfiguration(int capability, int radioTech) {
         if (radioTech == ImsRegistrationImplBase.REGISTRATION_TECH_IWLAN) {
-            return capability == MmTelCapabilities.CAPABILITY_TYPE_VOICE;
+            return capability == MmTelCapabilities.CAPABILITY_TYPE_VOICE
+                    || capability == MmTelCapabilities.CAPABILITY_TYPE_SMS;
         }
         return mLegacyCaps.isCapable(capability);
     }
@@ -213,9 +214,14 @@ final class WfcMmTelFeature extends MmTelFeature
     }
 
     private void updateCapabilities() {
-        MmTelCapabilities caps = wifiRegistered()
-                ? new MmTelCapabilities(MmTelCapabilities.CAPABILITY_TYPE_VOICE)
-                : new MmTelCapabilities(mLegacyCaps);
+        MmTelCapabilities caps;
+        if (wifiRegistered()) {
+            caps = new MmTelCapabilities(MmTelCapabilities.CAPABILITY_TYPE_VOICE);
+            // Without this the platform never offers us an SMS to carry.
+            caps.addCapabilities(MmTelCapabilities.CAPABILITY_TYPE_SMS);
+        } else {
+            caps = new MmTelCapabilities(mLegacyCaps);
+        }
         notifyCapabilitiesStatusChanged(caps);
     }
 
@@ -343,7 +349,7 @@ final class WfcMmTelFeature extends MmTelFeature
 
     @Override
     public synchronized ImsSmsImplBase getSmsImplementation() {
-        if (mSms == null) mSms = new WfcSms(mHandler, mRegistrar);
+        if (mSms == null) mSms = new WfcSms(mContext, mSubId, mHandler, () -> mRegistrar);
         return mSms;
     }
 
@@ -392,7 +398,15 @@ final class WfcMmTelFeature extends MmTelFeature
     @Override
     public void onResponse(SipMessage msg) {
         WfcCallSession call = mCalls.get(msg.header("Call-ID"));
-        if (call != null) call.onResponse(msg);
+        if (call != null) {
+            call.onResponse(msg);
+            return;
+        }
+        WfcSms sms;
+        synchronized (this) {
+            sms = mSms;
+        }
+        if (sms != null) sms.onResponse(msg);
     }
 
     @Override

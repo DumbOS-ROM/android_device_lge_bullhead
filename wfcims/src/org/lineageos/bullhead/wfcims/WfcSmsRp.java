@@ -40,6 +40,7 @@ final class WfcSmsRp {
      * platform hands over, which already carries its own length octet, type of number and digits.
      */
     static byte[] encodeData(int reference, byte[] serviceCentreAddressField, byte[] tpdu) {
+        if (tpdu == null) tpdu = new byte[0];
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         out.write(RP_DATA_MS_TO_N);
         out.write(reference & 0xff);
@@ -86,10 +87,10 @@ final class WfcSmsRp {
         return new byte[] {(byte) RP_SMMA_MS_TO_N, (byte) (reference & 0xff)};
     }
 
-    /** Refuses a delivery with a cause from TS 24.011 table 8.4. */
+    /** Refuses a delivery with a cause from TS 24.011 table 8.4; the length counts the cause. */
     static byte[] encodeError(int reference, int cause) {
-        return new byte[] {(byte) RP_ERROR_MS_TO_N, (byte) (reference & 0xff), 2,
-                (byte) (cause & 0x7f)};
+        return new byte[] {(byte) RP_ERROR_MS_TO_N, (byte) (reference & 0xff), 1,
+                (byte) (0x80 | (cause & 0x7f))};
     }
 
     /** Reads a message from the network; type is -1 when it cannot be understood. */

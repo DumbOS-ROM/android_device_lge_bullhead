@@ -359,11 +359,18 @@ final class SecAgreeChannel implements AutoCloseable {
      * the stream cannot be framed. The caller has already dropped leading CRLF keep-alives.
      */
     private static int messageLength(byte[] buf, int len) {
-        String text = new String(buf, 0, len, StandardCharsets.UTF_8);
-        int head = text.indexOf("\r\n\r\n");
+        // Byte offsets throughout: a non-ASCII header byte would shift a character index.
+        int head = -1;
+        for (int i = 0; i + 3 < len; i++) {
+            if (buf[i] == '\r' && buf[i + 1] == '\n' && buf[i + 2] == '\r' && buf[i + 3] == '\n') {
+                head = i;
+                break;
+            }
+        }
         if (head < 0) return 0;
+        String text = new String(buf, 0, head, StandardCharsets.UTF_8);
         int body = 0;
-        for (String line : text.substring(0, head).replaceAll("\r\n[ \t]+", " ").split("\r\n")) {
+        for (String line : text.replaceAll("\r\n[ \t]+", " ").split("\r\n")) {
             int colon = line.indexOf(':');
             if (colon < 0) continue;
             String name = line.substring(0, colon).trim();

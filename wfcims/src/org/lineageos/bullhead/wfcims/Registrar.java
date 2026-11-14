@@ -118,8 +118,8 @@ final class Registrar implements SecAgreeChannel.Listener {
      * Sends a SIP MESSAGE carrying an SMS relay message to the service centre, or back to
      * whoever delivered one. False when there is no registration to send it over.
      */
-    boolean sendSms(byte[] rp, String requestUri) {
-        if (mChannel == null || !mChannel.isProtected() || mIdentity == null) return false;
+    String sendSms(byte[] rp, String requestUri) {
+        if (mChannel == null || !mChannel.isProtected() || mIdentity == null) return null;
         String target = requestUri != null ? requestUri : mIdentity;
         StringBuilder sb = new StringBuilder();
         sb.append("MESSAGE ").append(target).append(" SIP/2.0\r\n");
@@ -130,7 +130,8 @@ final class Registrar implements SecAgreeChannel.Listener {
         for (String r : mServiceRoute) sb.append("Route: ").append(r).append("\r\n");
         sb.append("From: <").append(mIdentity).append(">;tag=").append(hex(4)).append("\r\n");
         sb.append("To: <").append(target).append(">\r\n");
-        sb.append("Call-ID: ").append(hex(12)).append("@wfcims\r\n");
+        String callId = hex(12) + "@wfcims";
+        sb.append("Call-ID: ").append(callId).append("\r\n");
         sb.append("CSeq: ").append(++mSmsCseq).append(" MESSAGE\r\n");
         sb.append("P-Preferred-Identity: <").append(mIdentity).append(">\r\n");
         sb.append("Request-Disposition: no-fork\r\n");
@@ -142,10 +143,10 @@ final class Registrar implements SecAgreeChannel.Listener {
         sb.append("Content-Length: ").append(rp.length).append("\r\n\r\n");
         try {
             mChannel.sendRequest(sb.toString(), rp);
-            return true;
+            return callId;
         } catch (Exception e) {
             Log.w(TAG, "sending an SMS: " + e);
-            return false;
+            return null;
         }
     }
 

@@ -5,8 +5,10 @@
 
 package org.lineageos.bullhead.wfcims;
 
+import android.content.Context;
 import android.os.Handler;
 import android.telephony.SmsManager;
+import android.telephony.SubscriptionManager;
 import android.telephony.SmsMessage;
 import android.telephony.ims.stub.ImsSmsImplBase;
 import android.util.Log;
@@ -14,6 +16,7 @@ import android.util.Log;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Supplier;
 
 /**
  * SMS over the IMS connection (TS 24.341): the transport PDU travels inside a SIP MESSAGE whose
@@ -28,17 +31,24 @@ final class WfcSms extends ImsSmsImplBase {
     private static final class Pending {
         final int token;
         final int messageRef;
+        final int reference;
+        final String callId;
         final Runnable timeout;
 
-        Pending(int token, int messageRef, Runnable timeout) {
+        Pending(int token, int messageRef, int reference, String callId, Runnable timeout) {
             this.token = token;
             this.messageRef = messageRef;
+            this.reference = reference;
+            this.callId = callId;
             this.timeout = timeout;
         }
     }
 
+    private final Context mContext;
+    private final int mSubId;
     private final Handler mHandler;
-    private final Registrar mRegistrar;
+    /** Looked up per use: the registrar is replaced whenever the IMS connection changes. */
+    private final Supplier<Registrar> mRegistrarSupplier;
     private final AtomicInteger mReference = new AtomicInteger(0);
     private final AtomicInteger mIncomingToken = new AtomicInteger(0);
     /** Keyed by the relay reference we put on the wire. */
@@ -56,9 +66,15 @@ final class WfcSms extends ImsSmsImplBase {
 
     private final Map<Integer, Delivery> mToAcknowledge = new HashMap<>();
 
-    WfcSms(Handler handler, Registrar registrar) {
+    WfcSms(Context context, int subId, Handler handler, Supplier<Registrar> registrar) {
+        mContext = context;
+        mSubId = subId;
         mHandler = handler;
-        mRegistrar = registrar;
+        mRegistrarSupplier = registrar;
+    }
+
+    private Registrar registrar() {
+        return mRegistrarSupplier.get();
     }
 
     @Override
@@ -78,30 +94,44 @@ final class WfcSms extends ImsSmsImplBase {
             fail(token, messageRef, SmsManager.RESULT_ERROR_GENERIC_FAILURE);
             return;
         }
-        if (!mRegistrar.isRegistered()) {
+        Registrar reg = registrar();
+        if (reg == null || !reg.isRegistered()) {
             // Nothing to send over; the platform will try the cellular path instead.
             fallback(token, messageRef);
             return;
         }
-        byte[] address = WfcSmsRp.hexToBytes(smsc);
-        if (address == null || address.length < 2 || (address[0] & 0xff) + 1 > address.length) {
-            Log.w(TAG, "no usable service centre address for this message");
-            fallback(token, messageRef);
-            return;
-        }
         int reference = mReference.incrementAndGet() & 0xff;
-        byte[] rp = WfcSmsRp.encodeData(reference, address, pdu);
-        if (!mRegistrar.sendSms(rp, serviceCentreUri(address))) {
+        byte[] address = WfcSmsRp.hexToBytes(smsc);
+        boolean usable = address != null && address.length >= 2
+                && (address[0] & 0xff) + 1 <= address.length;
+        byte[] rp;
+        String target;
+        if (usable) {
+            rp = WfcSmsRp.encodeData(reference, address, pdu);
+            target = serviceCentreUri(address);
+        } else {
+            // Apps rarely name a service centre, so fall back to the one on the SIM.
+            String number = simServiceCentre();
+            if (number == null) {
+                Log.w(TAG, "no service centre address for this message");
+                fallback(token, messageRef);
+                return;
+            }
+            rp = WfcSmsRp.encodeData(reference, number, pdu);
+            target = "tel:" + number;
+        }
+        String callId = reg.sendSms(rp, target);
+        if (callId == null) {
             fallback(token, messageRef);
             return;
         }
         Runnable timeout = () -> {
             if (mPending.remove(reference) != null) {
                 Log.w(TAG, "no answer to the message we sent");
-                fail(token, messageRef, SmsManager.RESULT_ERROR_NO_SERVICE);
+                fallback(token, messageRef);
             }
         };
-        mPending.put(reference, new Pending(token, messageRef, timeout));
+        mPending.put(reference, new Pending(token, messageRef, reference, callId, timeout));
         mHandler.postDelayed(timeout, SEND_TIMEOUT_MS);
         Log.i(TAG, "SMS sent over Wi-Fi, reference " + reference);
     }
@@ -109,18 +139,19 @@ final class WfcSms extends ImsSmsImplBase {
     /** A SIP MESSAGE carrying SMS arrived; returns true when it was ours to handle. */
     boolean onMessage(SecAgreeChannel channel, SipMessage msg, SecAgreeChannel.Source from) {
         String type = msg.header("Content-Type");
+        if (type == null) type = msg.header("c");
         if (type == null || !type.toLowerCase().startsWith(CONTENT_TYPE)) return false;
         // Only the P-CSCF may hand us a message. After the security association is installed the
         // channel proves that by itself, but until then anything on the IMS network could claim
         // to be an SMS, and the platform would show it as one.
-        if (channel != mRegistrar.channel() || !channel.isProtected()) {
+        if (channel != registrar().channel() || !channel.isProtected()) {
             Log.w(TAG, "refusing an SMS that arrived unprotected");
-            mRegistrar.answer(channel, msg, from, 403, "Forbidden");
+            registrar().answer(channel, msg, from, 403, "Forbidden");
             return true;
         }
         WfcSmsRp.Incoming in = WfcSmsRp.decode(msg.bodyBytes);
         // Answer the SIP transaction whatever the body turns out to be.
-        mRegistrar.answer(channel, msg, from, 200, "OK");
+        registrar().answer(channel, msg, from, 200, "OK");
         switch (in.type) {
             case WfcSmsRp.RP_DATA_N_TO_MS: {
                 int token = mIncomingToken.incrementAndGet();
@@ -141,7 +172,11 @@ final class WfcSms extends ImsSmsImplBase {
                 if (p != null) {
                     mHandler.removeCallbacks(p.timeout);
                     Log.i(TAG, "the network acknowledged reference " + in.reference);
-                    onSendSmsResultSuccess(p.token, p.messageRef);
+                    try {
+                        onSendSmsResultSuccess(p.token, p.messageRef);
+                    } catch (RuntimeException e) {
+                        Log.w(TAG, "reporting a sent message: " + e);
+                    }
                 }
                 return true;
             }
@@ -160,6 +195,36 @@ final class WfcSms extends ImsSmsImplBase {
         }
     }
 
+    /** A final response to a MESSAGE we sent; the relay acknowledgement comes separately. */
+    void onResponse(SipMessage msg) {
+        if (!"MESSAGE".equalsIgnoreCase(msg.method())) return;
+        int code = msg.code();
+        if (code < 300) return;
+        String callId = msg.header("Call-ID");
+        for (Pending p : new java.util.ArrayList<>(mPending.values())) {
+            if (!p.callId.equals(callId)) continue;
+            mPending.remove(p.reference);
+            mHandler.removeCallbacks(p.timeout);
+            Log.w(TAG, "the network rejected our message: " + msg.startLine);
+            fallback(p.token, p.messageRef);
+            return;
+        }
+    }
+
+    /** The service centre stored on the SIM, or null. */
+    private String simServiceCentre() {
+        try {
+            SmsManager sms = mContext.getSystemService(SmsManager.class);
+            if (SubscriptionManager.isValidSubscriptionId(mSubId)) {
+                sms = sms.createForSubscriptionId(mSubId);
+            }
+            return sms.getSmscAddress();
+        } catch (RuntimeException e) {
+            Log.w(TAG, "reading the service centre from the SIM: " + e);
+            return null;
+        }
+    }
+
     @Override
     public void acknowledgeSms(int token, int messageRef, int result) {
         mHandler.post(() -> {
@@ -168,8 +233,8 @@ final class WfcSms extends ImsSmsImplBase {
             byte[] rp = result == DELIVER_STATUS_OK
                     ? WfcSmsRp.encodeAck(d.reference)
                     : WfcSmsRp.encodeError(d.reference,
-                            result == DELIVER_STATUS_ERROR_NO_MEMORY ? 22 : 21);
-            mRegistrar.sendSms(rp, d.target);
+                            result == DELIVER_STATUS_ERROR_NO_MEMORY ? 22 : 111);
+            registrar().sendSms(rp, d.target);
         });
     }
 
@@ -177,7 +242,7 @@ final class WfcSms extends ImsSmsImplBase {
     public void acknowledgeSmsReport(int token, int messageRef, int result) {
         mHandler.post(() -> {
             Delivery d = mToAcknowledge.remove(token);
-            if (d != null) mRegistrar.sendSms(WfcSmsRp.encodeAck(d.reference), d.target);
+            if (d != null) registrar().sendSms(WfcSmsRp.encodeAck(d.reference), d.target);
         });
     }
 
