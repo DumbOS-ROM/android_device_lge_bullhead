@@ -28,6 +28,11 @@ final class WfcSmsRp {
         int reference;
         /** The transport PDU for RP-DATA, empty otherwise. */
         byte[] tpdu = new byte[0];
+        /**
+         * The originator address field of an RP-DATA, length octet included. For a delivery it
+         * holds the service centre, which the platform's parser expects in front of the PDU.
+         */
+        byte[] originator = new byte[0];
         /** The cause value for RP-ERROR, otherwise 0. */
         int cause;
     }
@@ -102,8 +107,11 @@ final class WfcSmsRp {
         int p = 2;
         if (type == RP_DATA_N_TO_MS) {
             if (p >= rp.length) return in;
-            int originatorLength = rp[p++] & 0xff;
-            p += originatorLength;
+            int originatorLength = rp[p] & 0xff;
+            if (p + 1 + originatorLength > rp.length) return in;
+            in.originator = new byte[1 + originatorLength];
+            System.arraycopy(rp, p, in.originator, 0, in.originator.length);
+            p += 1 + originatorLength;
             if (p >= rp.length) return in;
             int destinationLength = rp[p++] & 0xff;
             p += destinationLength;

@@ -162,8 +162,13 @@ final class WfcSms extends ImsSmsImplBase {
                 mToAcknowledge.put(token, new Delivery(in.reference, sender,
                         msg.header("Call-ID")));
                 Log.i(TAG, "SMS received over Wi-Fi, reference " + in.reference);
+                // The platform parses an over-the-air PDU, which starts with the service centre
+                // address; the relay protocol carries it separately, as the originator.
+                byte[] pdu = new byte[in.originator.length + in.tpdu.length];
+                System.arraycopy(in.originator, 0, pdu, 0, in.originator.length);
+                System.arraycopy(in.tpdu, 0, pdu, in.originator.length, in.tpdu.length);
                 try {
-                    onSmsReceived(token, SmsMessage.FORMAT_3GPP, in.tpdu);
+                    onSmsReceived(token, SmsMessage.FORMAT_3GPP, pdu);
                 } catch (RuntimeException e) {
                     Log.w(TAG, "handing the message to the platform: " + e);
                     mToAcknowledge.remove(token);
