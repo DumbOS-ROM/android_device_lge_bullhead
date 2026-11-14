@@ -74,6 +74,7 @@ PRODUCT_COPY_FILES += \
     frameworks/native/data/etc/android.hardware.nfc.hce.xml:$(TARGET_COPY_OUT_SYSTEM)/etc/permissions/android.hardware.nfc.hce.xml \
     frameworks/native/data/etc/android.hardware.nfc.hcef.xml:$(TARGET_COPY_OUT_SYSTEM)/etc/permissions/android.hardware.nfc.hcef.xml \
     frameworks/native/data/etc/android.hardware.ethernet.xml:$(TARGET_COPY_OUT_SYSTEM)/etc/permissions/android.hardware.ethernet.xml \
+    frameworks/native/data/etc/android.software.ipsec_tunnels.xml:$(TARGET_COPY_OUT_SYSTEM)/etc/permissions/android.software.ipsec_tunnels.xml \
     frameworks/native/data/etc/android.software.midi.xml:$(TARGET_COPY_OUT_SYSTEM)/etc/permissions/android.software.midi.xml \
     frameworks/native/data/etc/android.software.verified_boot.xml:$(TARGET_COPY_OUT_SYSTEM)/etc/permissions/android.software.verified_boot.xml \
     frameworks/native/data/etc/com.nxp.mifare.xml:$(TARGET_COPY_OUT_SYSTEM)/etc/permissions/com.nxp.mifare.xml \
@@ -508,10 +509,11 @@ PRODUCT_PACKAGES += \
     BullheadImsWfcOverlay \
     ImsCompatBridge
 
-# Wi-Fi calling in Android, for a modem whose IKE cannot do SHA-2. Inert until the carrier
-# config names it, so shipping the package alone changes nothing.
+# Wi-Fi calling in Android, for a modem whose IKE cannot do SHA-2. The phone and Wi-Fi
+# calling overlays select it, so nothing runs until both are enabled.
 PRODUCT_PACKAGES += \
     BullheadWfcIms \
     ImsMediaService \
+    Iwlan \
     libimsmedia
 PRODUCT_PACKAGES += bullhead_gps_debug.conf
