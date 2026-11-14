@@ -23,15 +23,27 @@ import android.telephony.ims.feature.CapabilityChangeRequest;
 import android.telephony.ims.feature.MmTelFeature;
 import android.telephony.ims.stub.ImsCallSessionImplBase;
 import android.telephony.ims.stub.ImsRegistrationImplBase;
+import android.telephony.ims.stub.ImsConfigImplBase;
+import android.telephony.ims.stub.ImsUtImplBase;
 import android.util.Log;
+
+import com.android.ims.internal.IImsCallSession;
+import com.android.ims.internal.IImsConfig;
+import com.android.ims.internal.IImsUt;
+
+import android.os.RemoteException;
 
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Map;
 
-/** MMTEL voice over IWLAN, registered by {@link Registrar}. One call at a time. */
+/**
+ * MMTEL for both transports: our own SIP stack over Wi-Fi, and the modem's IMS over cellular
+ * through {@link WfcLegacyIms}. Wi-Fi wins whenever it is registered. One Wi-Fi call at a time;
+ * cellular calls are the modem's own sessions and are passed straight through.
+ */
 final class WfcMmTelFeature extends MmTelFeature
-        implements Registrar.Callback, WfcCallSession.Owner {
+        implements Registrar.Callback, WfcCallSession.Owner, WfcLegacyIms.Callback {
     private static final String TAG = "WfcIms";
 
     private final Context mContext;
@@ -43,27 +55,36 @@ final class WfcMmTelFeature extends MmTelFeature
     private Network mImsNetwork;
     private boolean mVoiceWlanEnabled;
     private final Map<String, WfcCallSession> mCalls = new HashMap<>();
+    private final WfcLegacyIms mLegacy;
+    private MmTelCapabilities mLegacyCaps = new MmTelCapabilities();
+    private int mReportedTech = -1;
 
-    WfcMmTelFeature(Context context, Looper looper, int subId, ImsRegistrationImplBase reg) {
+    WfcMmTelFeature(Context context, Looper looper, int slotId, int subId,
+            ImsRegistrationImplBase reg) {
         mContext = context;
         mHandler = new Handler(looper);
         mSubId = subId;
         mRegistration = reg;
+        mLegacy = new WfcLegacyIms(context, slotId, this);
     }
 
     @Override
     public void onFeatureReady() {
+        mLegacy.start();
     }
 
     @Override
     public void onFeatureRemoved() {
+        mLegacy.stop();
         shutdown();
     }
 
     @Override
     public boolean queryCapabilityConfiguration(int capability, int radioTech) {
-        return capability == MmTelCapabilities.CAPABILITY_TYPE_VOICE
-                && radioTech == ImsRegistrationImplBase.REGISTRATION_TECH_IWLAN;
+        if (radioTech == ImsRegistrationImplBase.REGISTRATION_TECH_IWLAN) {
+            return capability == MmTelCapabilities.CAPABILITY_TYPE_VOICE;
+        }
+        return mLegacyCaps.isCapable(capability);
     }
 
     @Override
@@ -78,6 +99,13 @@ final class WfcMmTelFeature extends MmTelFeature
         }
         final boolean want = enabled;
         mHandler.post(() -> setVoiceWlanEnabled(want));
+        // Anything that is not voice over Wi-Fi belongs to the modem's provisioning.
+        for (CapabilityChangeRequest.CapabilityPair p : request.getCapabilitiesToEnable()) {
+            if (!isVoiceWlan(p)) mLegacy.setFeature(p.getCapability(), p.getRadioTech(), true);
+        }
+        for (CapabilityChangeRequest.CapabilityPair p : request.getCapabilitiesToDisable()) {
+            if (!isVoiceWlan(p)) mLegacy.setFeature(p.getCapability(), p.getRadioTech(), false);
+        }
     }
 
     private static boolean isVoiceWlan(CapabilityChangeRequest.CapabilityPair p) {
@@ -175,11 +203,87 @@ final class WfcMmTelFeature extends MmTelFeature
         }
     }
 
+    private boolean wifiRegistered() {
+        return mVoiceWlanEnabled && mRegistrar != null && mRegistrar.isRegistered();
+    }
+
     private void updateCapabilities() {
-        boolean voice = mVoiceWlanEnabled && mRegistrar != null && mRegistrar.isRegistered();
-        notifyCapabilitiesStatusChanged(voice
+        MmTelCapabilities caps = wifiRegistered()
                 ? new MmTelCapabilities(MmTelCapabilities.CAPABILITY_TYPE_VOICE)
-                : new MmTelCapabilities());
+                : new MmTelCapabilities(mLegacyCaps);
+        notifyCapabilitiesStatusChanged(caps);
+    }
+
+    /** One registration is reported to the framework; Wi-Fi wins while it is up. */
+    private void updateRegistration() {
+        int tech = wifiRegistered() ? ImsRegistrationImplBase.REGISTRATION_TECH_IWLAN
+                : mLegacy.isRegistered() ? WfcLegacyIms.registrationTech() : -1;
+        if (tech == mReportedTech) return;
+        mReportedTech = tech;
+        if (tech == -1) {
+            mRegistration.onDeregistered(new ImsReasonInfo(
+                    ImsReasonInfo.CODE_REGISTRATION_ERROR, 0, "no transport registered"));
+        } else {
+            Log.i(TAG, "registered over " + (tech
+                    == ImsRegistrationImplBase.REGISTRATION_TECH_IWLAN ? "Wi-Fi" : "cellular"));
+            mRegistration.onRegistered(tech);
+        }
+        updateCapabilities();
+    }
+
+    @Override
+    public void onLegacyRegistered() {
+        mHandler.post(this::updateRegistration);
+    }
+
+    @Override
+    public void onLegacyDeregistered(ImsReasonInfo reason) {
+        mHandler.post(this::updateRegistration);
+    }
+
+    @Override
+    public void onLegacyCapabilities(MmTelCapabilities capabilities) {
+        mHandler.post(() -> {
+            mLegacyCaps = capabilities;
+            updateCapabilities();
+        });
+    }
+
+    @Override
+    public void onLegacyIncomingCall(IImsCallSession session, Bundle extras) {
+        try {
+            notifyIncomingCallSession(session, extras);
+        } catch (RuntimeException e) {
+            Log.w(TAG, "reporting the modem's incoming call: " + e);
+        }
+    }
+
+    /** The modem's provisioning, or null before the legacy service is up. */
+    ImsConfigImplBase legacyConfig() {
+        try {
+            IImsConfig config = mLegacy.getConfig();
+            return config == null ? null : new WfcLegacyConfig(config);
+        } catch (RemoteException e) {
+            Log.w(TAG, "legacy config: " + e);
+            return null;
+        }
+    }
+
+    @Override
+    public ImsUtImplBase getUt() {
+        try {
+            IImsUt ut = mLegacy.getUt();
+            if (ut == null) return super.getUt();
+            return new ImsUtImplBase() {
+                @Override
+                public IImsUt getInterface() {
+                    return ut;
+                }
+            };
+        } catch (RemoteException e) {
+            Log.w(TAG, "legacy Ut: " + e);
+            return super.getUt();
+        }
     }
 
     void shutdown() {
@@ -201,9 +305,7 @@ final class WfcMmTelFeature extends MmTelFeature
     @Override
     public void onDeregistered(String reason) {
         endCalls("deregistered: " + reason);
-        mRegistration.onDeregistered(new ImsReasonInfo(
-                ImsReasonInfo.CODE_REGISTRATION_ERROR, 0, reason));
-        updateCapabilities();
+        updateRegistration();
     }
 
     @Override

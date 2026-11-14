@@ -9,6 +9,7 @@ import android.os.HandlerThread;
 import android.telephony.ims.ImsService;
 import android.telephony.ims.feature.ImsFeature;
 import android.telephony.ims.feature.MmTelFeature;
+import android.telephony.ims.stub.ImsConfigImplBase;
 import android.telephony.ims.stub.ImsFeatureConfiguration;
 import android.telephony.ims.stub.ImsRegistrationImplBase;
 import android.util.Log;
@@ -57,11 +58,18 @@ public class WfcImsService extends ImsService {
     public synchronized MmTelFeature createMmTelFeatureForSubscription(int slotId,
             int subscriptionId) {
         Log.i(TAG, "MMTEL feature for slot " + slotId + " sub " + subscriptionId);
-        WfcMmTelFeature f = new WfcMmTelFeature(this, thread().getLooper(), subscriptionId,
-                getRegistrationForSubscription(slotId, subscriptionId));
+        WfcMmTelFeature f = new WfcMmTelFeature(this, thread().getLooper(), slotId,
+                subscriptionId, getRegistrationForSubscription(slotId, subscriptionId));
         f.setFeatureState(ImsFeature.STATE_READY);
         mFeatures.put(slotId, f);
         return f;
+    }
+
+    @Override
+    public synchronized ImsConfigImplBase getConfig(int slotId) {
+        WfcMmTelFeature f = mFeatures.get(slotId);
+        ImsConfigImplBase config = f != null ? f.legacyConfig() : null;
+        return config != null ? config : super.getConfig(slotId);
     }
 
     @Override
