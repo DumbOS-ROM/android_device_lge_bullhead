@@ -17,6 +17,8 @@ final class SipMessage {
     final String startLine;
     final List<String[]> headers = new ArrayList<>();
     final String body;
+    /** The body as it arrived; SMS bodies are binary. */
+    byte[] bodyBytes = new byte[0];
 
     private SipMessage(String startLine, String body) {
         this.startLine = startLine;
@@ -24,12 +26,22 @@ final class SipMessage {
     }
 
     static SipMessage parse(byte[] data, int length) {
-        String text = new String(data, 0, length, StandardCharsets.UTF_8);
-        int split = text.indexOf("\r\n\r\n");
-        String head = split < 0 ? text : text.substring(0, split);
-        String body = split < 0 ? "" : text.substring(split + 4);
+        // Split on bytes: an SMS body is binary and must survive untouched.
+        int split = -1;
+        for (int i = 0; i + 3 < length; i++) {
+            if (data[i] == '\r' && data[i + 1] == '\n' && data[i + 2] == '\r'
+                    && data[i + 3] == '\n') {
+                split = i;
+                break;
+            }
+        }
+        String head = new String(data, 0, split < 0 ? length : split, StandardCharsets.UTF_8);
+        byte[] rawBody = new byte[split < 0 ? 0 : length - split - 4];
+        if (rawBody.length > 0) System.arraycopy(data, split + 4, rawBody, 0, rawBody.length);
+        String body = new String(rawBody, StandardCharsets.UTF_8);
         String[] lines = head.replaceAll("\r\n[ \t]+", " ").split("\r\n");
         SipMessage msg = new SipMessage(lines[0], body);
+        msg.bodyBytes = rawBody;
         for (int i = 1; i < lines.length; i++) {
             int colon = lines[i].indexOf(':');
             if (colon > 0) {

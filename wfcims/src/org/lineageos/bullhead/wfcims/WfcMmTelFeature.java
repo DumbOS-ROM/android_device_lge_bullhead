@@ -25,6 +25,7 @@ import android.telephony.ims.feature.MmTelFeature;
 import android.telephony.ims.stub.ImsCallSessionImplBase;
 import android.telephony.ims.stub.ImsRegistrationImplBase;
 import android.telephony.ims.stub.ImsConfigImplBase;
+import android.telephony.ims.stub.ImsSmsImplBase;
 import android.telephony.ims.stub.ImsUtImplBase;
 import android.util.Log;
 
@@ -61,6 +62,7 @@ final class WfcMmTelFeature extends MmTelFeature
     private final WfcLegacyIms mLegacy;
     private MmTelCapabilities mLegacyCaps = new MmTelCapabilities();
     private int mReportedTech = -1;
+    private WfcSms mSms;
 
     WfcMmTelFeature(Context context, Looper looper, int slotId, int subId,
             ImsRegistrationImplBase reg) {
@@ -340,7 +342,20 @@ final class WfcMmTelFeature extends MmTelFeature
     }
 
     @Override
+    public synchronized ImsSmsImplBase getSmsImplementation() {
+        if (mSms == null) mSms = new WfcSms(mHandler, mRegistrar);
+        return mSms;
+    }
+
+    @Override
     public boolean onRequest(SecAgreeChannel channel, SipMessage msg, SecAgreeChannel.Source from) {
+        if ("MESSAGE".equalsIgnoreCase(msg.method())) {
+            WfcSms sms;
+            synchronized (this) {
+                sms = mSms;
+            }
+            if (sms != null && sms.onMessage(channel, msg, from)) return true;
+        }
         WfcCallSession call = mCalls.get(msg.header("Call-ID"));
         if (call != null) {
             call.onRequest(channel, msg, from);

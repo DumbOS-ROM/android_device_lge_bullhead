@@ -76,6 +76,7 @@ final class Registrar implements SecAgreeChannel.Listener {
     private String mSubToTag;
     private int mSubCseq;
     private boolean mSubscribed;
+    private int mSmsCseq;
 
     Registrar(Context context, Handler handler, ImsIdentity id, Callback callback) {
         mContext = context;
@@ -113,6 +114,41 @@ final class Registrar implements SecAgreeChannel.Listener {
         return mChannel.serverPort();
     }
 
+    /**
+     * Sends a SIP MESSAGE carrying an SMS relay message to the service centre, or back to
+     * whoever delivered one. False when there is no registration to send it over.
+     */
+    boolean sendSms(byte[] rp, String requestUri) {
+        if (mChannel == null || !mChannel.isProtected() || mIdentity == null) return false;
+        String target = requestUri != null ? requestUri : mIdentity;
+        StringBuilder sb = new StringBuilder();
+        sb.append("MESSAGE ").append(target).append(" SIP/2.0\r\n");
+        sb.append("Via: SIP/2.0/UDP ").append(localHost()).append(':').append(localPort())
+                .append(";branch=z9hG4bK").append(hex(8)).append(";rport\r\n");
+        sb.append("Max-Forwards: 70\r\n");
+        sb.append("Route: ").append(initialRoute()).append("\r\n");
+        for (String r : mServiceRoute) sb.append("Route: ").append(r).append("\r\n");
+        sb.append("From: <").append(mIdentity).append(">;tag=").append(hex(4)).append("\r\n");
+        sb.append("To: <").append(target).append(">\r\n");
+        sb.append("Call-ID: ").append(hex(12)).append("@wfcims\r\n");
+        sb.append("CSeq: ").append(++mSmsCseq).append(" MESSAGE\r\n");
+        sb.append("P-Preferred-Identity: <").append(mIdentity).append(">\r\n");
+        sb.append("Request-Disposition: no-fork\r\n");
+        sb.append("P-Access-Network-Info: IEEE-802.11\r\n");
+        sb.append("Security-Verify: ").append(mChannel.securityVerify()).append("\r\n");
+        sb.append("Require: sec-agree\r\nProxy-Require: sec-agree\r\n");
+        sb.append("User-Agent: LineageOS-bullhead-wfcims\r\n");
+        sb.append("Content-Type: ").append(WfcSms.CONTENT_TYPE).append("\r\n");
+        sb.append("Content-Length: ").append(rp.length).append("\r\n\r\n");
+        try {
+            mChannel.sendRequest(sb.toString(), rp);
+            return true;
+        } catch (Exception e) {
+            Log.w(TAG, "sending an SMS: " + e);
+            return false;
+        }
+    }
+
     /** Loose route to the P-CSCF's protected port, for requests outside a dialog. */
     String initialRoute() {
         return "<sip:[" + mChannel.pcscf.getHostAddress() + "]:" + mChannel.pcscfPort() + ";lr>";
@@ -125,7 +161,8 @@ final class Registrar implements SecAgreeChannel.Listener {
     String contact() {
         return "<sip:" + mId.user + "@" + localHost() + ":" + localPort() + ">"
                 + (mInstanceId != null ? ";+sip.instance=\"<" + mInstanceId + ">\"" : "")
-                + ";+g.3gpp.icsi-ref=\"urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel\";audio";
+                + ";+g.3gpp.icsi-ref=\"urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel\";audio"
+                + ";+g.3gpp.smsip";
     }
 
     /** Sends a request to the P-CSCF over the protected channel; false if that failed. */

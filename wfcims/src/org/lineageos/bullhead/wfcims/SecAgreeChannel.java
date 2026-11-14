@@ -231,6 +231,17 @@ final class SecAgreeChannel implements AutoCloseable {
         }
     }
 
+    /** Sends a request with a binary body, for SMS. */
+    void sendRequest(String headers, byte[] body) throws Exception {
+        byte[] head = headers.getBytes(StandardCharsets.UTF_8);
+        byte[] out = new byte[head.length + body.length];
+        System.arraycopy(head, 0, out, 0, head.length);
+        System.arraycopy(body, 0, out, head.length, body.length);
+        mClient.send(new DatagramPacket(out, out.length, new InetSocketAddress(pcscf,
+                mPcscfPortS)));
+        logSip(">>> udp-c to port " + mPcscfPortS + " (binary body)", headers);
+    }
+
     /** Sends a request from the client socket: port 5060 before protection, port-s after. */
     void sendRequest(String msg) throws Exception {
         byte[] out = msg.getBytes(StandardCharsets.UTF_8);
