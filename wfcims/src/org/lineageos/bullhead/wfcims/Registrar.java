@@ -320,6 +320,13 @@ final class Registrar implements SecAgreeChannel.Listener {
     public void onMessage(SecAgreeChannel channel, SipMessage msg, SecAgreeChannel.Source from) {
         if (channel != mChannel) return;
         if (!msg.isResponse()) {
+            // Until the security associations exist anything on the IMS network can reach these
+            // ports, so a call, a text or a deregistration could be forged; refuse them all.
+            if (!channel.isProtected()) {
+                Log.w(TAG, "refusing " + msg.method() + " before the security associations exist");
+                answer(channel, msg, from, 403, "Forbidden");
+                return;
+            }
             if (mSubCallId != null && mSubCallId.equals(msg.header("Call-ID"))
                     && "NOTIFY".equalsIgnoreCase(msg.method())) {
                 answer(channel, msg, from, 200, "OK");
