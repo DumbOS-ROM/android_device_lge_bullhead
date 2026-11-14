@@ -13,6 +13,7 @@ import android.content.IntentFilter;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.IBinder;
+import android.os.Message;
 import android.os.RemoteException;
 import android.os.ServiceManager;
 import android.telephony.TelephonyManager;
@@ -27,6 +28,8 @@ import java.util.concurrent.ConcurrentHashMap;
 
 import com.android.ims.internal.IImsCallSession;
 import com.android.ims.internal.IImsConfig;
+import com.android.ims.internal.IImsEcbm;
+import com.android.ims.internal.IImsMultiEndpoint;
 import com.android.ims.internal.IImsRegistrationListener;
 import com.android.ims.internal.IImsService;
 import com.android.ims.internal.IImsUt;
@@ -304,6 +307,22 @@ final class WfcLegacyIms {
 
     IImsCallSession createCallSession(ImsCallProfile profile) throws RemoteException {
         return service().createCallSession(mServiceId, profile, null);
+    }
+
+    IImsEcbm getEcbm() throws RemoteException {
+        return service().getEcbmInterface(mServiceId);
+    }
+
+    IImsMultiEndpoint getMultiEndpoint() throws RemoteException {
+        return service().getMultiEndpointInterface(mServiceId);
+    }
+
+    void setUiTtyMode(int mode, Message onComplete) {
+        try {
+            service().setUiTTYMode(mServiceId, mode, onComplete);
+        } catch (RemoteException e) {
+            Log.w(TAG, "setUiTTYMode: " + e);
+        }
     }
 
     IImsUt getUt() throws RemoteException {

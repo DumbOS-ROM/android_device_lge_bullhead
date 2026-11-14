@@ -14,6 +14,7 @@ import android.net.NetworkRequest;
 import android.net.TelephonyNetworkSpecifier;
 import android.os.Bundle;
 import android.os.Handler;
+import android.os.Message;
 import android.os.Looper;
 import android.telephony.TelephonyManager;
 import android.telephony.ims.ImsCallProfile;
@@ -29,6 +30,8 @@ import android.util.Log;
 
 import com.android.ims.internal.IImsCallSession;
 import com.android.ims.internal.IImsConfig;
+import com.android.ims.internal.IImsEcbm;
+import com.android.ims.internal.IImsMultiEndpoint;
 import com.android.ims.internal.IImsUt;
 
 import android.os.RemoteException;
@@ -274,6 +277,22 @@ final class WfcMmTelFeature extends MmTelFeature
 
     void disableModemIms() {
         mLegacy.turnOff();
+    }
+
+    /** Emergency callback mode, TTY and multi-endpoint are the modem's, as they were before. */
+    @Override
+    protected IImsEcbm getEcbmInterface() throws RemoteException {
+        return mLegacy.getEcbm();
+    }
+
+    @Override
+    public IImsMultiEndpoint getMultiEndpointInterface() throws RemoteException {
+        return mLegacy.getMultiEndpoint();
+    }
+
+    @Override
+    public void setUiTtyMode(int mode, Message onCompleteMessage) {
+        mLegacy.setUiTtyMode(mode, onCompleteMessage);
     }
 
     @Override
