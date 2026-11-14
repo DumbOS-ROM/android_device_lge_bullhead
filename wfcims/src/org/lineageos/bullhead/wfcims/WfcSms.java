@@ -13,8 +13,11 @@ import android.telephony.SmsMessage;
 import android.telephony.ims.stub.ImsSmsImplBase;
 import android.util.Log;
 
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
 
@@ -67,6 +70,14 @@ final class WfcSms extends ImsSmsImplBase {
     }
 
     private final Map<Integer, Delivery> mToAcknowledge = new HashMap<>();
+    /** SIP transactions already handled, newest last, so a retransmission is not a second SMS. */
+    private final Set<String> mSeen = Collections.newSetFromMap(
+            new LinkedHashMap<String, Boolean>(32, 0.75f, false) {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<String, Boolean> eldest) {
+                    return size() > 64;
+                }
+            });
 
     WfcSms(Context context, int subId, Handler handler, Supplier<Registrar> registrar) {
         mContext = context;
@@ -154,6 +165,13 @@ final class WfcSms extends ImsSmsImplBase {
         WfcSmsRp.Incoming in = WfcSmsRp.decode(msg.bodyBytes);
         // Answer the SIP transaction whatever the body turns out to be.
         registrar().answer(channel, msg, from, 200, "OK");
+        // The network retransmits a request until a response reaches it, and over UDP that
+        // happens often enough to show the same message twice.
+        String transaction = msg.header("Call-ID") + " " + msg.header("CSeq");
+        if (!mSeen.add(transaction)) {
+            Log.i(TAG, "a message we already handled arrived again");
+            return true;
+        }
         switch (in.type) {
             case WfcSmsRp.RP_DATA_N_TO_MS: {
                 int token = mIncomingToken.incrementAndGet();
