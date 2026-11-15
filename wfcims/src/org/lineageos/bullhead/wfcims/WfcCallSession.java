@@ -10,6 +10,7 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Message;
 import android.os.RemoteException;
+import android.telephony.TelephonyManager;
 import android.telephony.ims.ImsCallProfile;
 import android.telephony.ims.ImsCallSessionListener;
 import android.telephony.ims.ImsReasonInfo;
@@ -99,6 +100,7 @@ final class WfcCallSession extends ImsCallSessionImplBase {
         mTx = new Handler(handler.getLooper());
         mReg = reg;
         mProfile = profile;
+        markWifi(mProfile);
         mOwner = owner;
         mIncoming = false;
         mCallId = Registrar.hex(12) + "@wfcims";
@@ -116,6 +118,7 @@ final class WfcCallSession extends ImsCallSessionImplBase {
         mCallId = invite.header("Call-ID");
         mProfile = new ImsCallProfile(ImsCallProfile.SERVICE_TYPE_NORMAL,
                 ImsCallProfile.CALL_TYPE_VOICE);
+        markWifi(mProfile);
         String caller = callerNumber(invite);
         mProfile.setCallExtra(ImsCallProfile.EXTRA_OI, caller == null ? "" : caller);
         mProfile.setCallExtraInt(ImsCallProfile.EXTRA_OIR, caller == null
@@ -123,6 +126,12 @@ final class WfcCallSession extends ImsCallSessionImplBase {
                 : ImsCallProfile.OIR_PRESENTATION_NOT_RESTRICTED);
         mProfile.setCallExtraInt(ImsCallProfile.EXTRA_CNAP,
                 ImsCallProfile.OIR_PRESENTATION_NOT_RESTRICTED);
+    }
+
+    /** Telephony labels a call as Wi-Fi only from this extra (ImsCall.isWifiCall). */
+    private static void markWifi(ImsCallProfile profile) {
+        profile.setCallExtraInt(ImsCallProfile.EXTRA_CALL_NETWORK_TYPE,
+                TelephonyManager.NETWORK_TYPE_IWLAN);
     }
 
     /** Number from P-Asserted-Identity (tel: first), else From; null when withheld. */

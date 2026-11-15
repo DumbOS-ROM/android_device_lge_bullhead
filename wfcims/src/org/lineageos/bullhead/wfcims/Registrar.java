@@ -218,6 +218,12 @@ final class Registrar implements SecAgreeChannel.Listener {
         try {
             LinkProperties lp = mContext.getSystemService(ConnectivityManager.class)
                     .getLinkProperties(mNetwork);
+            if (lp == null) {
+                // The network is gone; the feature starts a new registrar when one comes back.
+                mStopping = true;
+                fail("IMS network " + mNetwork + " is gone");
+                return;
+            }
             InetAddress local = null;
             for (LinkAddress la : lp.getLinkAddresses()) {
                 InetAddress a = la.getAddress();

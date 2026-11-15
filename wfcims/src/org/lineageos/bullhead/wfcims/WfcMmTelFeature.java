@@ -184,14 +184,22 @@ final class WfcMmTelFeature extends MmTelFeature
     }
 
     private void onImsNetwork(Network network) {
-        if (network.equals(mImsNetwork)) return;
         // The IMS APN can also come up over cellular, and this stack only speaks to the ePDG
         // tunnel the IWLAN data service builds, so wait for an ipsec interface.
         LinkProperties lp = mContext.getSystemService(ConnectivityManager.class)
                 .getLinkProperties(network);
         String iface = lp != null ? lp.getInterfaceName() : null;
-        if (iface == null || !iface.startsWith("ipsec")) {
+        boolean tunnel = iface != null && iface.startsWith("ipsec");
+        if (network.equals(mImsNetwork)) {
+            if (iface != null && !tunnel) dropImsNetwork("IMS network " + network
+                    + " moved to " + iface);
+            return;
+        }
+        if (!tunnel) {
             Log.i(TAG, "IMS network " + network + " is on " + iface + ", not the ePDG tunnel");
+            // The request moved to a cellular IMS network; no onLost comes for the tunnel.
+            if (iface != null && mImsNetwork != null) dropImsNetwork("IMS network "
+                    + mImsNetwork + " replaced by " + network);
             return;
         }
         Log.i(TAG, "IMS network " + network + " available on " + iface);
@@ -204,13 +212,18 @@ final class WfcMmTelFeature extends MmTelFeature
 
     private void onImsNetworkLost(Network network) {
         if (!network.equals(mImsNetwork)) return;
-        Log.i(TAG, "IMS network " + network + " lost");
+        dropImsNetwork("IMS network " + network + " lost");
+    }
+
+    private void dropImsNetwork(String why) {
+        Log.i(TAG, why);
         mImsNetwork = null;
-        endCalls("IMS network lost");
+        endCalls(why);
         if (mRegistrar != null) {
             mRegistrar.stop();
             mRegistrar = null;
         }
+        updateRegistration();
     }
 
     private boolean wifiRegistered() {
