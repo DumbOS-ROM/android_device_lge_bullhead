@@ -64,6 +64,9 @@ final class WfcCallSession extends ImsCallSessionImplBase {
     private final Set<String> mPracked = new HashSet<>();
     private volatile int mState = State.IDLE;
     private volatile ImsCallSessionListener mListener;
+    /** Telephony drops its pending dial once told the call is initiating, and with it any
+     *  later start failure; past that point a failure has to end the call instead. */
+    private volatile boolean mInitiatingReported;
     private WfcMedia mMedia;
     private String mRuri;
     private String mInitialRoute;
@@ -315,7 +318,10 @@ final class WfcCallSession extends ImsCallSessionImplBase {
                 + "\r\n\r\n" + mLocalSdp;
         mState = State.INITIATED;
         Log.i(TAG, "calling " + mRuri);
-        if (mListener != null) mListener.callSessionInitiating(mProfile);
+        if (mListener != null) {
+            mListener.callSessionInitiating(mProfile);
+            mInitiatingReported = true;
+        }
         mInviteSends = 0;
         sendInvite();
     }
@@ -952,7 +958,7 @@ final class WfcCallSession extends ImsCallSessionImplBase {
         }
         Log.i(TAG, "call ended: " + why);
         if (mListener != null) {
-            if (initiating) {
+            if (initiating && !mInitiatingReported) {
                 mListener.callSessionInitiatingFailed(why);
             } else {
                 mListener.callSessionTerminated(why);
