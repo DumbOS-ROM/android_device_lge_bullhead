@@ -7,6 +7,7 @@ package org.lineageos.bullhead.wfcims;
 
 import android.content.Context;
 import android.net.ConnectivityManager;
+import android.net.InetAddresses;
 import android.net.LinkAddress;
 import android.net.LinkProperties;
 import android.net.Network;
@@ -484,7 +485,18 @@ final class Registrar implements SecAgreeChannel.Listener {
         }
     }
 
-    /** Logs what the network says about our bindings; acting on it is left for later. */
+    private static final Pattern REGISTRATION =
+            Pattern.compile("<registration\\b[^>]*?\\bstate=\"([a-z]+)\"");
+    private static final Pattern CONTACT = Pattern.compile(
+            "<contact\\b([^>]*)>(?:(?!</contact>).)*?<uri>([^<]*)</uri>", Pattern.DOTALL);
+    private static final Pattern STATE = Pattern.compile("\\bstate=\"([a-z]+)\"");
+    private static final Pattern EVENT = Pattern.compile("\\bevent=\"([a-z]+)\"");
+    private static final Pattern URI_HOST = Pattern.compile("@\\[([0-9A-Fa-f:.]+)\\]");
+
+    /**
+     * A binding the network ended would otherwise stay shown as registered until the next
+     * refresh, with incoming calls lost meanwhile (TS 24.229 5.1.1.5).
+     */
     private void onRegNotify(SipMessage msg) {
         Matcher m = Pattern.compile("state=\"([a-z]+)\"(?:[^>]*?\\bevent=\"([a-z]+)\")?")
                 .matcher(msg.body);
@@ -495,6 +507,49 @@ final class Registrar implements SecAgreeChannel.Listener {
             states.append(' ');
         }
         Log.i(TAG, "registration state notified: " + states.toString().trim());
+        if (!mRegistered || mStopping) return;
+        String event = endedEvent(msg.body);
+        if (event == null) return;
+        boolean later = event.equals("rejected") || event.equals("probation");
+        Log.w(TAG, "the network ended our registration (" + event + "), registering again"
+                + (later ? " in " + RETRY_MS / 1000 + " s" : ""));
+        closeChannel();
+        mHandler.removeCallbacksAndMessages(null);
+        mRegistered = false;
+        mCallback.onDeregistered("ended by the network: " + event);
+        mHandler.postDelayed(this::startFresh, later ? RETRY_MS : 0);
+    }
+
+    /** The event that ended our binding, or null while it is still active or not listed. */
+    private String endedEvent(String body) {
+        String ended = null;
+        Matcher c = CONTACT.matcher(body);
+        while (c.find()) {
+            if (!isOurs(c.group(2))) continue;
+            Matcher state = STATE.matcher(c.group(1));
+            if (!state.find() || !state.group(1).equals("terminated")) return null;
+            Matcher event = EVENT.matcher(c.group(1));
+            ended = event.find() ? event.group(1) : "terminated";
+        }
+        if (ended != null) return ended;
+        // No contact of ours listed: only a registration terminated as a whole ends ours.
+        Matcher r = REGISTRATION.matcher(body);
+        boolean any = false;
+        while (r.find()) {
+            if (!r.group(1).equals("terminated")) return null;
+            any = true;
+        }
+        return any ? "terminated" : null;
+    }
+
+    private boolean isOurs(String uri) {
+        Matcher h = URI_HOST.matcher(uri);
+        if (!h.find() || mChannel == null) return false;
+        try {
+            return InetAddresses.parseNumericAddress(h.group(1)).equals(mChannel.local);
+        } catch (IllegalArgumentException e) {
+            return false;
+        }
     }
 
     void answer(SecAgreeChannel channel, SipMessage req, SecAgreeChannel.Source to, int code,
