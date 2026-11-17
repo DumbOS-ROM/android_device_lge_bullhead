@@ -392,12 +392,14 @@ final class WfcMmTelFeature extends MmTelFeature
         mContext.getSystemService(TelephonyManager.class)
                 .unregisterTelephonyCallback(mCallStateListener);
         mCallStateListener = null;
+        WfcQualifiedNetworks.setCallActive(false);
     }
 
     private final class CallStateListener extends TelephonyCallback
             implements TelephonyCallback.CallStateListener {
         @Override
         public void onCallStateChanged(int state) {
+            WfcQualifiedNetworks.setCallActive(state != TelephonyManager.CALL_STATE_IDLE);
             if (state == TelephonyManager.CALL_STATE_IDLE) updateModemIms();
         }
     }

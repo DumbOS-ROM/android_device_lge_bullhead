@@ -32,6 +32,7 @@ public class WfcQualifiedNetworks extends QualifiedNetworksService {
     private static final SparseArray<Provider> sProviders = new SparseArray<>();
     /** Volatile and read without a lock: update() must never wait on the class monitor. */
     private static volatile boolean sVoiceWlanEnabled;
+    private static volatile boolean sCallActive;
 
     /** Told where the IMS APN goes, on the provider's callback thread. */
     interface TransportListener {
@@ -64,6 +65,21 @@ public class WfcQualifiedNetworks extends QualifiedNetworksService {
         synchronized (sLock) {
             if (sVoiceWlanEnabled == enabled) return;
             sVoiceWlanEnabled = enabled;
+            providers = new ArrayList<>(sProviders.size());
+            for (int i = 0; i < sProviders.size(); i++) providers.add(sProviders.valueAt(i));
+        }
+        for (Provider p : providers) p.update();
+    }
+
+    /**
+     * Called by the MMTEL feature. Moving the IMS APN to IWLAN tears down the LTE IMS PDN, which
+     * ends a VoLTE call, so it waits until the call ends.
+     */
+    static void setCallActive(boolean active) {
+        List<Provider> providers;
+        synchronized (sLock) {
+            if (sCallActive == active) return;
+            sCallActive = active;
             providers = new ArrayList<>(sProviders.size());
             for (int i = 0; i < sProviders.size(); i++) providers.add(sProviders.valueAt(i));
         }
@@ -116,6 +132,14 @@ public class WfcQualifiedNetworks extends QualifiedNetworksService {
         void update() {
             boolean iwlan = !mWifi.isEmpty() && sVoiceWlanEnabled;
             synchronized (this) {
+                if (iwlan && sCallActive && !Boolean.TRUE.equals(mOnIwlan)) {
+                    if (mOnIwlan != null) {
+                        Log.i(TAG, "slot " + mSlot
+                                + ": IMS APN stays on cellular until the call ends");
+                        return;
+                    }
+                    iwlan = false;
+                }
                 if (mOnIwlan != null && mOnIwlan == iwlan) return;
                 mOnIwlan = iwlan;
             }
