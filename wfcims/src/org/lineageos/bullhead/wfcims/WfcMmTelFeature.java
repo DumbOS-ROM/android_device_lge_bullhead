@@ -16,6 +16,7 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Message;
 import android.os.Looper;
+import android.telephony.TelephonyCallback;
 import android.telephony.TelephonyManager;
 import android.telephony.ims.ImsCallProfile;
 import android.telephony.ims.ImsCallSessionListener;
@@ -47,7 +48,8 @@ import java.util.Map;
  * cellular calls are the modem's own sessions and are passed straight through.
  */
 final class WfcMmTelFeature extends MmTelFeature
-        implements Registrar.Callback, WfcCallSession.Owner, WfcLegacyIms.Callback {
+        implements Registrar.Callback, WfcCallSession.Owner, WfcLegacyIms.Callback,
+        WfcQualifiedNetworks.TransportListener {
     private static final String TAG = "WfcIms";
 
     private final Context mContext;
@@ -64,12 +66,19 @@ final class WfcMmTelFeature extends MmTelFeature
     private int mReportedTech = -1;
     private WfcSms mSms;
     private final WfcTrial mTrial;
+    private final int mSlotId;
+    /** What the framework last asked for through enable/disableIms, null before it did. */
+    private Boolean mModemImsWanted;
+    private boolean mImsApnOnIwlan;
+    private Boolean mModemImsOn;
+    private CallStateListener mCallStateListener;
 
     WfcMmTelFeature(Context context, Looper looper, int slotId, int subId,
             ImsRegistrationImplBase reg) {
         mContext = context;
         mHandler = new Handler(looper);
         mSubId = subId;
+        mSlotId = slotId;
         mRegistration = reg;
         mLegacy = new WfcLegacyIms(context, slotId, this);
         mTrial = new WfcTrial(context, mHandler, subId);
@@ -78,10 +87,13 @@ final class WfcMmTelFeature extends MmTelFeature
     @Override
     public void onFeatureReady() {
         mLegacy.start();
+        mHandler.post(this::watchCallState);
+        WfcQualifiedNetworks.setTransportListener(this);
     }
 
     @Override
     public void onFeatureRemoved() {
+        WfcQualifiedNetworks.clearTransportListener(this);
         mLegacy.stop();
         shutdown();
     }
@@ -297,11 +309,97 @@ final class WfcMmTelFeature extends MmTelFeature
     }
 
     void enableModemIms() {
-        mLegacy.turnOn();
+        mHandler.post(() -> {
+            mModemImsWanted = true;
+            mModemImsOn = null;
+            updateModemIms();
+        });
     }
 
     void disableModemIms() {
-        mLegacy.turnOff();
+        mHandler.post(() -> {
+            mModemImsWanted = false;
+            mModemImsOn = null;
+            updateModemIms();
+        });
+    }
+
+    @Override
+    public void onImsApnTransport(int slotIndex, boolean iwlan) {
+        if (slotIndex != mSlotId) return;
+        mHandler.post(() -> {
+            mImsApnOnIwlan = iwlan;
+            updateModemIms();
+        });
+    }
+
+    /**
+     * SFR keeps one IMS session per subscriber: while the modem's is up on LTE the ePDG deletes
+     * ours, so the modem's IMS is off whenever the IMS APN is on IWLAN.
+     */
+    private void updateModemIms() {
+        boolean on;
+        if (mImsApnOnIwlan) {
+            on = false;
+        } else if (mModemImsWanted != null) {
+            on = mModemImsWanted;
+        } else if (Boolean.FALSE.equals(mModemImsOn)) {
+            on = true;
+        } else {
+            return;
+        }
+        if (mModemImsOn != null && mModemImsOn == on) return;
+        if (!on && mImsApnOnIwlan && modemCallActive()) {
+            Log.i(TAG, "modem IMS stays on until the call ends");
+            return;
+        }
+        mModemImsOn = on;
+        Log.i(TAG, "modem IMS turned " + (on ? "on" : "off")
+                + (mImsApnOnIwlan ? ", IMS APN on IWLAN" : ""));
+        if (on) {
+            mLegacy.turnOn();
+        } else {
+            mLegacy.turnOff();
+        }
+    }
+
+    private boolean modemCallActive() {
+        if (!mCalls.isEmpty()) return false;
+        try {
+            return mContext.getSystemService(TelephonyManager.class)
+                    .createForSubscriptionId(mSubId).getCallStateForSubscription()
+                    != TelephonyManager.CALL_STATE_IDLE;
+        } catch (RuntimeException e) {
+            Log.w(TAG, "call state: " + e);
+            return false;
+        }
+    }
+
+    private void watchCallState() {
+        if (mCallStateListener != null) return;
+        mCallStateListener = new CallStateListener();
+        try {
+            mContext.getSystemService(TelephonyManager.class).createForSubscriptionId(mSubId)
+                    .registerTelephonyCallback(mHandler::post, mCallStateListener);
+        } catch (RuntimeException e) {
+            Log.w(TAG, "cannot watch the call state: " + e);
+            mCallStateListener = null;
+        }
+    }
+
+    private void unwatchCallState() {
+        if (mCallStateListener == null) return;
+        mContext.getSystemService(TelephonyManager.class)
+                .unregisterTelephonyCallback(mCallStateListener);
+        mCallStateListener = null;
+    }
+
+    private final class CallStateListener extends TelephonyCallback
+            implements TelephonyCallback.CallStateListener {
+        @Override
+        public void onCallStateChanged(int state) {
+            if (state == TelephonyManager.CALL_STATE_IDLE) updateModemIms();
+        }
     }
 
     /** Emergency callback mode, TTY and multi-endpoint are the modem's, as they were before. */
@@ -341,7 +439,10 @@ final class WfcMmTelFeature extends MmTelFeature
     }
 
     void shutdown() {
-        mHandler.post(this::releaseImsNetwork);
+        mHandler.post(() -> {
+            unwatchCallState();
+            releaseImsNetwork();
+        });
     }
 
     @Override

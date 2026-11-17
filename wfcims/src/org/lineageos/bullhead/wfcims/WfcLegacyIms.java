@@ -74,6 +74,7 @@ final class WfcLegacyIms {
     private volatile boolean mStarted;
     /** LTE capability requests, replayed whenever the vendor service comes back. */
     private final Map<Integer, Boolean> mWantedFeatures = new ConcurrentHashMap<>();
+    private volatile Boolean mWantedOn;
 
     private final IBinder.DeathRecipient mDeath = new IBinder.DeathRecipient() {
         @Override
@@ -268,6 +269,8 @@ final class WfcLegacyIms {
             for (Map.Entry<Integer, Boolean> e : mWantedFeatures.entrySet()) {
                 pushFeature(e.getKey(), e.getValue());
             }
+            Boolean on = mWantedOn;
+            if (on != null) pushOnOff(on);
         } catch (RemoteException e) {
             Log.e(TAG, "opening the legacy session: " + e);
             mLegacy = null;
@@ -360,18 +363,25 @@ final class WfcLegacyIms {
     }
 
     void turnOn() {
-        try {
-            service().turnOnIms(mSlotId);
-        } catch (RemoteException e) {
-            Log.w(TAG, "turnOnIms: " + e);
-        }
+        mWantedOn = true;
+        pushOnOff(true);
     }
 
     void turnOff() {
+        mWantedOn = false;
+        pushOnOff(false);
+    }
+
+    private void pushOnOff(boolean on) {
         try {
-            service().turnOffIms(mSlotId);
+            if (on) {
+                service().turnOnIms(mSlotId);
+            } else {
+                service().turnOffIms(mSlotId);
+            }
         } catch (RemoteException e) {
-            Log.w(TAG, "turnOffIms: " + e);
+            // Kept in mWantedOn and replayed once the vendor service is back.
+            Log.w(TAG, (on ? "turnOnIms: " : "turnOffIms: ") + e);
         }
     }
 

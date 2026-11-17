@@ -33,6 +33,31 @@ public class WfcQualifiedNetworks extends QualifiedNetworksService {
     /** Volatile and read without a lock: update() must never wait on the class monitor. */
     private static volatile boolean sVoiceWlanEnabled;
 
+    /** Told where the IMS APN goes, on the provider's callback thread. */
+    interface TransportListener {
+        void onImsApnTransport(int slotIndex, boolean iwlan);
+    }
+
+    private static volatile TransportListener sListener;
+
+    /** Also replays the current transport of every slot that has reported one. */
+    static void setTransportListener(TransportListener listener) {
+        List<Provider> providers;
+        synchronized (sLock) {
+            sListener = listener;
+            providers = new ArrayList<>(sProviders.size());
+            for (int i = 0; i < sProviders.size(); i++) providers.add(sProviders.valueAt(i));
+        }
+        for (Provider p : providers) p.replay(listener);
+    }
+
+    /** Only clears it if a replacing feature has not set its own since. */
+    static void clearTransportListener(TransportListener listener) {
+        synchronized (sLock) {
+            if (sListener == listener) sListener = null;
+        }
+    }
+
     /** Called by the MMTEL feature; the IMS APN only moves to IWLAN while voice over WLAN is on. */
     static void setVoiceWlanEnabled(boolean enabled) {
         List<Provider> providers;
@@ -97,6 +122,16 @@ public class WfcQualifiedNetworks extends QualifiedNetworksService {
             Log.i(TAG, "slot " + mSlot + ": IMS APN on " + (iwlan ? "IWLAN" : "cellular"));
             updateQualifiedNetworkTypes(ApnSetting.TYPE_IMS,
                     iwlan ? List.of(AccessNetworkType.IWLAN) : List.of());
+            TransportListener listener = sListener;
+            if (listener != null) listener.onImsApnTransport(mSlot, iwlan);
+        }
+
+        void replay(TransportListener listener) {
+            Boolean iwlan;
+            synchronized (this) {
+                iwlan = mOnIwlan;
+            }
+            if (iwlan != null) listener.onImsApnTransport(mSlot, iwlan);
         }
 
         @Override
