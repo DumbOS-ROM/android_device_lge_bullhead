@@ -67,7 +67,7 @@ lib64/libloc_ds_api.so:system/lib64/libloc_ds_api.so|89347db7f9bb3f6c47c3922407d
 
 # vendor/app
 -vendor/app/datastatusnotification/datastatusnotification.apk|a273be5aa8961cf26fce807cf6769eca497811b4
--vendor/app/ims/ims.apk|7147a6528dfa5cad8b38484fb0bbf78363e10ece|5cc41e34af252c8af575dbe298defc3e025cb97a
+-vendor/app/ims/ims.apk|7147a6528dfa5cad8b38484fb0bbf78363e10ece|e8ef07d1899e5ccc2fb0b0374b3d8f2afc371fb4
 
 # vendor/bin
 bin/ATFWD-daemon:vendor/bin/ATFWD-daemon|cc895189ef6400c81924bcc27a8b727ae1921926|7e4ff956b94cd911df8752e0d324ccf0423df95b
